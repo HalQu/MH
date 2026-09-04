@@ -7,6 +7,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
+#include "GamePlay/Combat/UCombatComponent.h"
 // Sets default values
 AMHCharacter::AMHCharacter()
 {
@@ -31,6 +32,8 @@ AMHCharacter::AMHCharacter()
 	Camera->SetupAttachment(SpringArm);
 	Camera->bUsePawnControlRotation = false; // prevents camera from moving independently
 
+	CombatComponent = CreateDefaultSubobject<UCombatComponent>(TEXT("CombatComponent"));
+
 	bUseControllerRotationYaw = false;
 	GetCharacterMovement()->bOrientRotationToMovement = true;
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f);
@@ -49,8 +52,30 @@ void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 	if (UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		EnhancedInput->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AMHCharacter::Move);
-		EnhancedInput->BindAction(LookAction, ETriggerEvent::Triggered, this, &AMHCharacter::Look);
+		EnhancedInput->BindAction(IA_Move, ETriggerEvent::Triggered, this, &AMHCharacter::Move);
+		EnhancedInput->BindAction(IA_Look, ETriggerEvent::Triggered, this, &AMHCharacter::Look);
+		if (IA_Attack_Y)
+		{
+			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Started, this, &AMHCharacter::OnYPressed);
+			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Completed, this, &AMHCharacter::OnYReleased);
+		}
+		if (IA_Attack_B)
+		{
+			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Started, this, &AMHCharacter::OnBPressed);
+			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Completed, this, &AMHCharacter::OnBReleased);
+		}
+
+		if (IA_Jump)
+		{
+			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Started, this, &AMHCharacter::Jump);
+			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Completed, this, &AMHCharacter::StopJumping);
+		}
+
+		if (IA_EquipWeapon)
+		{
+			EnhancedInput->BindAction(IA_EquipWeapon, ETriggerEvent::Started, this, &AMHCharacter::EquipWeapon);
+		}
+
 	}
 }
 
@@ -76,7 +101,10 @@ void AMHCharacter::Move(const FInputActionValue& Value)
 
 	AddMovementInput(Forward, InputVector.Y);
 	AddMovementInput(Right, InputVector.X);
-
+	if (CombatComponent)
+	{
+		CombatComponent->OnMove(InputVector);
+	}
 }
 
 void AMHCharacter::Look(const FInputActionValue& Value)
@@ -90,4 +118,40 @@ void AMHCharacter::Look(const FInputActionValue& Value)
 
 }
 
+
+void AMHCharacter::EquipWeapon(const FInputActionValue& Value)
+{
+	if (CombatComponent)
+	{
+		CombatComponent->EquipWeapon_Default();
+	}
+}
+void AMHCharacter::OnYPressed(const FInputActionValue& Value)
+{
+	if (CombatComponent)
+	{
+		CombatComponent->OnYPressed(IA_Attack_Y, ETriggerEvent::Started);
+	}
+}
+void AMHCharacter::OnYReleased(const FInputActionValue& Value)
+{
+	if (CombatComponent)
+	{
+		CombatComponent->OnYReleased(IA_Attack_Y, ETriggerEvent::Completed);
+	}
+}
+void AMHCharacter::OnBPressed(const FInputActionValue& Value)
+{
+	if (CombatComponent)
+	{
+		CombatComponent->OnBPressed(IA_Attack_B, ETriggerEvent::Started);
+	}
+}
+void AMHCharacter::OnBReleased(const FInputActionValue& Value)
+{
+	if (CombatComponent)
+	{
+		CombatComponent->OnBReleased(IA_Attack_B, ETriggerEvent::Completed);
+	}
+}
 

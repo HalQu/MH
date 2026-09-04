@@ -22,8 +22,7 @@ public:
     {
         if (AMHPlayerState* PS = GetDataSource<AMHPlayerState>())
         {
-            //HealthPercent.Set(PS->MaxHealth > 0 ? PS->CurrentHealth / PS->MaxHealth : 0.f);
-            HealthPercent.Set(0.5f);
+            HealthPercent.Set(PS->MaxHealth > 0 ? PS->CurrentHealth / PS->MaxHealth : 0.f);
         }
     }
 };

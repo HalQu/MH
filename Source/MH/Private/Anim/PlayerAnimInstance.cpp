@@ -5,6 +5,7 @@
 #include "GamePlay/Character/MHCharacter.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "MHUtils.h"
+#include "GamePlay/Combat/UCombatComponent.h"
 void UPlayerAnimInstance::NativeInitializeAnimation()
 {
 	Super::NativeInitializeAnimation();
@@ -16,6 +17,7 @@ void UPlayerAnimInstance::NativeInitializeAnimation()
 	if (!MHCharacter) return;
 
 	CharacterMovementComponent = MHCharacter->GetCharacterMovement();
+	CombatComponent = MHCharacter->FindComponentByClass<UCombatComponent>();
 }
 
 void UPlayerAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -32,4 +34,12 @@ void UPlayerAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	bIsInAir = CharacterMovementComponent->IsFalling();
 	bIsAccelerating = CharacterMovementComponent->GetCurrentAcceleration().SizeSquared() > KINDA_SMALL_NUMBER;
+
+	if (CombatComponent)
+	{
+		CombatState = CombatComponent->GetCombatState();
+		MovePhase = CombatComponent->GetMovePhase();
+		bIsAttacking = CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack;
+		CurrentWeaponId = CombatComponent->GetCurrentWeaponId();
+	}
 }

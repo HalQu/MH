@@ -4,7 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimInstance.h"
+#include "GamePlay/Combat/MHCombatTypes.h"
 #include "PlayerAnimInstance.generated.h"
+
+class UCombatComponent;
 
 /**
  * 
@@ -24,6 +27,9 @@ public:
 	UPROPERTY()
 	class UCharacterMovementComponent* CharacterMovementComponent;
 
+	UPROPERTY()
+	TObjectPtr<class UCombatComponent> CombatComponent = nullptr;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite)
 	bool bIsInAir = false;
 
@@ -41,4 +47,17 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite)
 	float Rota = 0.f;
+
+	// Combat state exposed to the animation graph. The AnimInstance never mutates gameplay state.
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Combat")
+	EMHCombatState CombatState = EMHCombatState::Locomotion;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Combat")
+	EMHCombatMovePhase MovePhase = EMHCombatMovePhase::None;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Combat")
+	bool bIsAttacking = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Combat")
+	FName CurrentWeaponId = NAME_None;
 };

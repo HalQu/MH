@@ -147,4 +147,6 @@ protected:
     if (VM!=nullptr) \
     { \
         VM->PropertyName.OnChanged.AddUObject(this, SetterFunc); \
+        /* 绑定即同步：立即广播当前值，防止首次广播早于订阅 */ \
+        VM->PropertyName.Broadcast(); \
     }
