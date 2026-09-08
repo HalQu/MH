@@ -13,7 +13,6 @@ enum class EMHCombatState : uint8
 {
 	Locomotion UMETA(DisplayName = "Locomotion"),
 	Attack UMETA(DisplayName = "Attack"),
-	AirAttack UMETA(DisplayName = "Air Attack"),
 	WeaponSwitch UMETA(DisplayName = "Weapon Switch")
 };
 
@@ -202,7 +201,4 @@ public:
 
 	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage")
 	FVector LaunchImpulse = FVector::ZeroVector;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage")
-	bool bIsAirAttack = false;
 };

@@ -7,6 +7,7 @@
 #include "MHCharacter.generated.h"
 
 struct FInputActionValue;
+enum class ETriggerEvent : uint8;
 class UInputMappingContext;
 class UInputAction;
 class UCombatComponent;
@@ -70,11 +71,9 @@ protected:
 private:
 	FVector2D InputVector;
 	void Move(const FInputActionValue& Value);
+	void StopMove();
 	void Look(const FInputActionValue& Value);
 
 	void EquipWeapon(const FInputActionValue& Value);
-	void OnYPressed(const FInputActionValue& Value);
-	void OnYReleased(const FInputActionValue& Value);
-	void OnBPressed(const FInputActionValue& Value);
-	void OnBReleased(const FInputActionValue& Value);
+	void HandleAttackInput(const FInputActionValue& Value, TObjectPtr<UInputAction> InputAction, ETriggerEvent TriggerEvent);
 };

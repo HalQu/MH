@@ -53,16 +53,19 @@ void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	if (UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
 		EnhancedInput->BindAction(IA_Move, ETriggerEvent::Triggered, this, &AMHCharacter::Move);
+		EnhancedInput->BindAction(IA_Move, ETriggerEvent::Completed, this, &AMHCharacter::StopMove);
 		EnhancedInput->BindAction(IA_Look, ETriggerEvent::Triggered, this, &AMHCharacter::Look);
 		if (IA_Attack_Y)
 		{
-			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Started, this, &AMHCharacter::OnYPressed);
-			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Completed, this, &AMHCharacter::OnYReleased);
+			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Started, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Started);
+			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Triggered, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Triggered);
+			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Completed, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Completed);
 		}
 		if (IA_Attack_B)
 		{
-			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Started, this, &AMHCharacter::OnBPressed);
-			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Completed, this, &AMHCharacter::OnBReleased);
+			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Started, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Started);
+			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Triggered, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Triggered);
+			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Completed, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Completed);
 		}
 
 		if (IA_Jump)
@@ -107,6 +110,17 @@ void AMHCharacter::Move(const FInputActionValue& Value)
 	}
 }
 
+void AMHCharacter::StopMove()
+{
+	InputVector = FVector2D::ZeroVector;
+	if (CombatComponent)
+	{
+		CombatComponent->OnMove(InputVector);
+	}
+}
+
+
+
 void AMHCharacter::Look(const FInputActionValue& Value)
 {
 	// Get look input as 2D vector
@@ -126,32 +140,10 @@ void AMHCharacter::EquipWeapon(const FInputActionValue& Value)
 		CombatComponent->EquipWeapon_Default();
 	}
 }
-void AMHCharacter::OnYPressed(const FInputActionValue& Value)
+void AMHCharacter::HandleAttackInput(const FInputActionValue&, TObjectPtr<UInputAction> InputAction, ETriggerEvent TriggerEvent)
 {
-	if (CombatComponent)
+	if (CombatComponent && InputAction)
 	{
-		CombatComponent->OnYPressed(IA_Attack_Y, ETriggerEvent::Started);
+		CombatComponent->HandleComboInput(InputAction, TriggerEvent);
 	}
 }
-void AMHCharacter::OnYReleased(const FInputActionValue& Value)
-{
-	if (CombatComponent)
-	{
-		CombatComponent->OnYReleased(IA_Attack_Y, ETriggerEvent::Completed);
-	}
-}
-void AMHCharacter::OnBPressed(const FInputActionValue& Value)
-{
-	if (CombatComponent)
-	{
-		CombatComponent->OnBPressed(IA_Attack_B, ETriggerEvent::Started);
-	}
-}
-void AMHCharacter::OnBReleased(const FInputActionValue& Value)
-{
-	if (CombatComponent)
-	{
-		CombatComponent->OnBReleased(IA_Attack_B, ETriggerEvent::Completed);
-	}
-}
-

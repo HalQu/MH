@@ -11,6 +11,7 @@ class ACharacter;
 class UAnimInstance;
 class UAnimMontage;
 class UCharacterMovementComponent;
+class UInputAction;
 class USkeletalMeshComponent;
 class UWeaponDataAsset;
 
@@ -18,6 +19,14 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMHCombatWeaponChanged, UWeaponDataA
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FMHCombatStateChanged, EMHCombatState, NewState, EMHCombatMovePhase, NewPhase);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMHCombatAttackStarted, FName, MoveId);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMHCombatAttackEnded, bool, bInterrupted);
+
+struct FMHCombatInputSnapshot
+{
+	UInputAction* InputAction = nullptr;
+	ETriggerEvent TriggerEvent = ETriggerEvent::None;
+	FVector2D MoveInput = FVector2D::ZeroVector;
+	float HoldDuration = 0.f;
+};
 
 /*
  * Authoritative combat state machine for one character.
@@ -37,10 +46,7 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	bool TryAttack(bool bForceAirAttack = false);
-
-	UFUNCTION(BlueprintCallable, Category = "Combat")
-	bool TryJumpAttack();
+	bool HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent);
 
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	bool CycleWeapon(int32 Delta);
@@ -104,10 +110,6 @@ public:
 
 	//input buffer
 	void OnMove(const FVector2D& MoveInput);
-	void OnYPressed(UInputAction* InputAction, ETriggerEvent TriggerEvent);
-	void OnYReleased(UInputAction* InputAction, ETriggerEvent TriggerEvent);
-	void OnBPressed(UInputAction* InputAction, ETriggerEvent TriggerEvent);
-	void OnBReleased(UInputAction* InputAction, ETriggerEvent TriggerEvent);
 
 protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Loadout")
@@ -150,8 +152,6 @@ protected:
 	int32 CurrentMoveIndex = INDEX_NONE;
 	int32 CurrentWeaponIndex = INDEX_NONE;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
-	bool bIsAirMove = false;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	bool bComboWindowOpen = false;
@@ -172,7 +172,6 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimInstance> CachedAnimInstance = nullptr;
 
-	bool bAttackInputQueued = false;
 	bool bHitExecuted = false;
 	bool bWeaponSwitchAllowed = false;
 	bool bMontageDelegatesBound = false;
@@ -181,9 +180,14 @@ protected:
 	TArray<TWeakObjectPtr<AActor>> HitActorsThisMove;
 
 private:
-	bool StartMove(const FMHCombatMoveData& Move, bool bAirMove, int32 MoveIndex);
+	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex);
+	bool TryStartAttack(const FMHCombatInputSnapshot& Input);
+	bool BufferNextCombo(const FMHCombatInputSnapshot& Input);
 	bool TryStartNextCombo();
-	const FMHCombatMoveData* GetMoveForAttack(bool bAirAttack, int32 MoveIndex) const;
+	const FMHCombatMoveData* GetMove(int32 MoveIndex) const;
+	int32 FindBestComboIndex(const TMap<FComboCondition, int32>& ComboMoves, const FMHCombatInputSnapshot& Input) const;
+	bool MatchesComboCondition(const FComboCondition& Condition, const FMHCombatInputSnapshot& Input) const;
+	void ClearBufferedComboInput();
 	void FinishCurrentMove(bool bInterrupted);
 	void UpdateMoveTiming(float DeltaTime);
 	void PerformHitCheck();
@@ -204,8 +208,7 @@ private:
 
 	//input buffer
 	FVector2D CurrentMoveInput; 
-	bool bYIsPressed = false;
-	bool bBIsPressed = false;
-	float YPressTime = 0.f;
-	float BPressTime = 0.f; 
+	FMHCombatInputSnapshot BufferedComboInput;
+	bool bHasBufferedComboInput = false;
+	TMap<UInputAction*, float> AttackInputPressTimes;
 };

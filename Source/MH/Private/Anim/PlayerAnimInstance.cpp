@@ -39,7 +39,7 @@ void UPlayerAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		CombatState = CombatComponent->GetCombatState();
 		MovePhase = CombatComponent->GetMovePhase();
-		bIsAttacking = CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack;
+		bIsAttacking = CombatState == EMHCombatState::Attack;
 		CurrentWeaponId = CombatComponent->GetCurrentWeaponId();
 	}
 }

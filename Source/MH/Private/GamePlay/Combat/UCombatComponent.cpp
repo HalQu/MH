@@ -52,6 +52,8 @@ void UCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	UnbindMontageDelegates();
 	UpdateMovementLock(false);
+	AttackInputPressTimes.Reset();
+	ClearBufferedComboInput();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -59,47 +61,193 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack)
+	if (CombatState == EMHCombatState::Attack)
 	{
 		UpdateMoveTiming(DeltaTime);
 	}
 }
 
-bool UCombatComponent::TryAttack(bool bForceAirAttack)
+
+
+bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent)
 {
-	if (!CachedCharacter || !CurrentWeapon)
+	if (!InputAction || !CachedCharacter || !CurrentWeapon || !GetWorld())
 	{
 		return false;
 	}
 
-	if (CombatState == EMHCombatState::Locomotion || CombatState == EMHCombatState::WeaponSwitch)
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	float HoldDuration = 0.f;
+	if (TriggerEvent == ETriggerEvent::Started)
 	{
-		const bool bAirMove = bForceAirAttack || IsAirborne();
-		const FMHCombatMoveData* Move = GetMoveForAttack(bAirMove, 0);
-		return Move && StartMove(*Move, bAirMove, 0);
+		AttackInputPressTimes.Add(InputAction, CurrentTime);
+	}
+	else if (TriggerEvent == ETriggerEvent::Triggered)
+	{
+		if (const float* PressTime = AttackInputPressTimes.Find(InputAction))
+		{
+			HoldDuration = CurrentTime - *PressTime;
+		}
+	}
+	else if (TriggerEvent == ETriggerEvent::Completed)
+	{
+		if (const float* PressTime = AttackInputPressTimes.Find(InputAction))
+		{
+			HoldDuration = CurrentTime - *PressTime;
+		}
+		AttackInputPressTimes.Remove(InputAction);
 	}
 
-	if (CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack)
-	{
-		const bool bAirMove = CombatState == EMHCombatState::AirAttack;
-		const bool bHasNextMove = GetMoveForAttack(bAirMove, CurrentMoveIndex + 1) != nullptr;
-		const bool bCanBuffer = CurrentMoveTime <= CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration;
+	const FMHCombatInputSnapshot InputSnapshot{InputAction, TriggerEvent, CurrentMoveInput, HoldDuration};
 
-		if (CurrentMoveData.bCanChain && bCanBuffer && bHasNextMove)
-		{
-			bAttackInputQueued = true;
-			return true;
-		}
+	if (CombatState == EMHCombatState::Locomotion || CombatState == EMHCombatState::WeaponSwitch)
+	{
+		return TryStartAttack(InputSnapshot);
+	}
+
+	if (CombatState == EMHCombatState::Attack)
+	{
+		return BufferNextCombo(InputSnapshot);
 	}
 
 	return false;
 }
 
-bool UCombatComponent::TryJumpAttack()
+bool UCombatComponent::TryStartAttack(const FMHCombatInputSnapshot& Input)
 {
-	return TryAttack(true);
+	if (!CurrentWeapon)
+	{
+		return false;
+	}
+
+	const TMap<FComboCondition, int32>& StartMoves = IsAirborne() ? CurrentWeapon->AirStartMoves : CurrentWeapon->GroundStartMoves;
+	const int32 MoveIndex = FindBestComboIndex(StartMoves, Input);
+	if (MoveIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const FMHCombatMoveData* Move = GetMove(MoveIndex);
+	return Move && StartMove(*Move, MoveIndex);
 }
 
+bool UCombatComponent::BufferNextCombo(const FMHCombatInputSnapshot& Input)
+{
+	if (!CurrentMoveData.bCanChain)
+	{
+		return false;
+	}
+
+	const int32 NextMoveIndex = FindBestComboIndex(CurrentMoveData.ComboChain, Input);
+	if (NextMoveIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const float InputDeadline = CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration;
+	if (CurrentMoveTime > InputDeadline)
+	{
+		return false;
+	}
+
+	BufferedComboInput = Input;
+	bHasBufferedComboInput = true;
+	TryStartNextCombo();
+	return true;
+}
+
+int32 UCombatComponent::FindBestComboIndex(const TMap<FComboCondition, int32>& ComboMoves, const FMHCombatInputSnapshot& Input) const
+{
+	int32 BestIndex = INDEX_NONE;
+	float BestScore = -1.f;
+
+	for (const TPair<FComboCondition, int32>& Pair : ComboMoves)
+	{
+		const FComboCondition& Condition = Pair.Key;
+		if (!MatchesComboCondition(Condition, Input))
+		{
+			continue;
+		}
+
+		float ConditionScore = 0.f;
+		if (Condition.bCheckHoldDuration)
+		{
+			ConditionScore += 1000.f + FMath::Max(0.f, Condition.MinHoldDuration) * 100.f;
+		}
+		if (Condition.bCheckMoveDirection)
+		{
+			ConditionScore += 100.f + Condition.MoveDirectionThreshold.Size() * 10.f;
+		}
+
+		if (ConditionScore > BestScore + KINDA_SMALL_NUMBER)
+		{
+			BestScore = ConditionScore;
+			BestIndex = Pair.Value;
+		}
+	}
+
+	return BestIndex;
+}
+
+bool UCombatComponent::MatchesComboCondition(const FComboCondition& Condition, const FMHCombatInputSnapshot& Input) const
+{
+	if (!Condition.InputAction || Condition.TriggerEvent == ETriggerEvent::None)
+	{
+		return false;
+	}
+
+	if (Condition.InputAction.Get() != Input.InputAction || Condition.TriggerEvent != Input.TriggerEvent)
+	{
+		return false;
+	}
+
+	if (Condition.bCheckHoldDuration)
+	{
+		if (Input.TriggerEvent != ETriggerEvent::Completed)
+		{
+			return false;
+		}
+		if (Input.HoldDuration + KINDA_SMALL_NUMBER < Condition.MinHoldDuration)
+		{
+			return false;
+		}
+	}
+
+	if (Condition.bCheckMoveDirection)
+	{
+		const FVector2D Threshold = Condition.MoveDirectionThreshold;
+		if (!FMath::IsNearlyZero(Threshold.X, 0.001f))
+		{
+			if (Threshold.X > 0.f && Input.MoveInput.X < Threshold.X - 0.001f)
+			{
+				return false;
+			}
+			if (Threshold.X < 0.f && Input.MoveInput.X > Threshold.X + 0.001f)
+			{
+				return false;
+			}
+		}
+		if (!FMath::IsNearlyZero(Threshold.Y, 0.001f))
+		{
+			if (Threshold.Y > 0.f && Input.MoveInput.Y < Threshold.Y - 0.001f)
+			{
+				return false;
+			}
+			if (Threshold.Y < 0.f && Input.MoveInput.Y > Threshold.Y + 0.001f)
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+void UCombatComponent::ClearBufferedComboInput()
+{
+	bHasBufferedComboInput = false;
+	BufferedComboInput = FMHCombatInputSnapshot();
+}
 bool UCombatComponent::CycleWeapon(int32 Delta)
 {
 	if (LoadoutWeapons.IsEmpty())
@@ -148,7 +296,7 @@ bool UCombatComponent::EquipWeapon(UWeaponDataAsset* NewWeapon)
 		return false;
 	}
 
-	if (CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack)
+	if (CombatState == EMHCombatState::Attack)
 	{
 		FinishCurrentMove(false);
 	}
@@ -253,7 +401,7 @@ bool UCombatComponent::RemoveWeaponFromLoadout(UWeaponDataAsset* Weapon)
 
 void UCombatComponent::HandleCombatNotify(EMHCombatNotifyType NotifyType)
 {
-	if (CombatState != EMHCombatState::Attack && CombatState != EMHCombatState::AirAttack)
+	if (CombatState != EMHCombatState::Attack)
 	{
 		return;
 	}
@@ -321,7 +469,7 @@ bool UCombatComponent::IsAirborne() const
 
 bool UCombatComponent::CanSwitchWeaponNow() const
 {
-	if (CombatState != EMHCombatState::Attack && CombatState != EMHCombatState::AirAttack)
+	if (CombatState != EMHCombatState::Attack)
 	{
 		return true;
 	}
@@ -337,38 +485,14 @@ void UCombatComponent::OnMove(const FVector2D& MoveInput)
 	CurrentMoveInput = MoveInput;
 }
 
-void UCombatComponent::OnYPressed(UInputAction* InputAction, ETriggerEvent TriggerEvent)
-{
-	bYIsPressed = true;
-	YPressTime = GetWorld()->GetTimeSeconds();
-}
-
-void UCombatComponent::OnYReleased(UInputAction* InputAction, ETriggerEvent TriggerEvent)
-{
-	bYIsPressed = false;
-	float HoldDuration = GetWorld()->GetTimeSeconds() - YPressTime;
-}
-
-void UCombatComponent::OnBPressed(UInputAction* InputAction, ETriggerEvent TriggerEvent)
-{
-	bBIsPressed = true;
-	BPressTime = GetWorld()->GetTimeSeconds();
-}
-
-void UCombatComponent::OnBReleased(UInputAction* InputAction, ETriggerEvent TriggerEvent)
-{
-	bBIsPressed = false;
-	float HoldDuration = GetWorld()->GetTimeSeconds() - BPressTime;
-}
-
-bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, bool bAirMove, int32 MoveIndex)
+bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex)
 {
 	if (!CachedCharacter)
 	{
 		return false;
 	}
 
-	UAnimMontage* PreviousMontage = (CombatState == EMHCombatState::Attack || CombatState == EMHCombatState::AirAttack)
+	UAnimMontage* PreviousMontage = (CombatState == EMHCombatState::Attack)
 		? CurrentMoveData.Montage
 		: nullptr;
 
@@ -376,14 +500,13 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, bool bAirMove, i
 	CurrentMoveIndex = MoveIndex;
 	CurrentMoveId = Move.MoveId;
 	CurrentMoveTime = 0.f;
-	bIsAirMove = bAirMove;
-	bAttackInputQueued = false;
+	ClearBufferedComboInput();
 	bHitExecuted = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
 	HitActorsThisMove.Reset();
 
-	if (bLockGroundMovementDuringAttack && !bAirMove)
+	if (bLockGroundMovementDuringAttack && !IsAirborne())
 	{
 		UpdateMovementLock(true);
 	}
@@ -395,7 +518,7 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, bool bAirMove, i
 		CachedCharacter->StopAnimMontage(PreviousMontage);
 	}
 
-	SetCombatState(bAirMove ? EMHCombatState::AirAttack : EMHCombatState::Attack, EMHCombatMovePhase::Startup);
+	SetCombatState(EMHCombatState::Attack, EMHCombatMovePhase::Startup);
 
 	if (CurrentMoveData.Montage)
 	{
@@ -406,9 +529,10 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, bool bAirMove, i
 	return true;
 }
 
+
 bool UCombatComponent::TryStartNextCombo()
 {
-	if (!bAttackInputQueued || !CurrentMoveData.bCanChain)
+	if (!bHasBufferedComboInput || !CurrentMoveData.bCanChain)
 	{
 		return false;
 	}
@@ -422,33 +546,36 @@ bool UCombatComponent::TryStartNextCombo()
 		return false;
 	}
 
-	const int32 NextIndex = CurrentMoveIndex + 1;
-	const bool bAirMove = CombatState == EMHCombatState::AirAttack;
-	const FMHCombatMoveData* NextMove = GetMoveForAttack(bAirMove, NextIndex);
-	if (!NextMove)
+	const int32 NextMoveIndex = FindBestComboIndex(CurrentMoveData.ComboChain, BufferedComboInput);
+	if (NextMoveIndex == INDEX_NONE)
 	{
-		bAttackInputQueued = false;
+		ClearBufferedComboInput();
 		return false;
 	}
 
-	bAttackInputQueued = false;
-	return StartMove(*NextMove, bAirMove, NextIndex);
+	const FMHCombatMoveData* NextMove = GetMove(NextMoveIndex);
+	if (!NextMove)
+	{
+		ClearBufferedComboInput();
+		return false;
+	}
+
+	ClearBufferedComboInput();
+	return StartMove(*NextMove, NextMoveIndex);
 }
 
-const FMHCombatMoveData* UCombatComponent::GetMoveForAttack(bool bAirAttack, int32 MoveIndex) const
+const FMHCombatMoveData* UCombatComponent::GetMove(int32 MoveIndex) const
 {
-	if (!CurrentWeapon)
+	if (!CurrentWeapon || !CurrentWeapon->Moves.IsValidIndex(MoveIndex))
 	{
 		return nullptr;
 	}
 
-	const TArray<FMHCombatMoveData>& Moves = bAirAttack ? CurrentWeapon->AirCombo : CurrentWeapon->GroundCombo;
-	return Moves.IsValidIndex(MoveIndex) ? &Moves[MoveIndex] : nullptr;
+	return &CurrentWeapon->Moves[MoveIndex];
 }
-
 void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 {
-	if (CombatState != EMHCombatState::Attack && CombatState != EMHCombatState::AirAttack)
+	if (CombatState != EMHCombatState::Attack)
 	{
 		return;
 	}
@@ -462,8 +589,7 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 	CurrentMoveId = NAME_None;
 	CurrentMoveTime = 0.f;
 	CurrentMoveIndex = INDEX_NONE;
-	bIsAirMove = false;
-	bAttackInputQueued = false;
+	ClearBufferedComboInput();
 	bHitExecuted = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
@@ -518,9 +644,9 @@ void UCombatComponent::UpdateMoveTiming(float DeltaTime)
 
 	SetCombatState(CombatState, NextPhase);
 
-	if (bAttackInputQueued && CurrentMoveTime > CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration)
+	if (bHasBufferedComboInput && CurrentMoveTime > CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration)
 	{
-		bAttackInputQueued = false;
+		ClearBufferedComboInput();
 	}
 
 	if (CurrentMoveTime >= GetCurrentMoveDuration())
@@ -529,7 +655,7 @@ void UCombatComponent::UpdateMoveTiming(float DeltaTime)
 		return;
 	}
 
-	if (bAttackInputQueued && bComboWindowOpen)
+	if (bHasBufferedComboInput && bComboWindowOpen)
 	{
 		TryStartNextCombo();
 	}
@@ -599,7 +725,6 @@ void UCombatComponent::ApplyDamageToTarget(AActor* Target, const FVector& HitLoc
 	DamageEvent.HitLocation = HitLocation;
 	DamageEvent.HitNormal = HitNormal;
 	DamageEvent.LaunchImpulse = CurrentMoveData.LaunchImpulse;
-	DamageEvent.bIsAirAttack = bIsAirMove;
 
 	IMHCombatTargetInterface::Execute_ReceiveDamage(Target, DamageEvent);
 }
@@ -618,6 +743,10 @@ void UCombatComponent::UpdateMovementLock(bool bLock)
 
 	if (bLock)
 	{
+		if (bMovementLocked)
+		{
+			return;
+		}
 		if (!CachedMovement->IsFalling())
 		{
 			SavedMovementMode = CachedMovement->MovementMode;

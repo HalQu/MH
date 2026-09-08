@@ -25,10 +25,13 @@ public:
 	TObjectPtr<UStaticMesh> MeshAsset;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|MoveSet")
-	TArray<FMHCombatMoveData> GroundCombo;
+	TArray<FMHCombatMoveData> Moves;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|MoveSet")
-	TArray<FMHCombatMoveData> AirCombo;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Start")
+	TMap<FComboCondition, int32> GroundStartMoves;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Start")
+	TMap<FComboCondition, int32> AirStartMoves;
 
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override;
 };
