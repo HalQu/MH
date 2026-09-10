@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Engine/EngineTypes.h"
+#include "UObject/SoftObjectPath.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GamePlay/Combat/MHCombatTypes.h"
 #include "UCombatComponent.generated.h"
@@ -44,6 +45,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	bool HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent);
@@ -136,26 +138,29 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	TObjectPtr<UWeaponDataAsset> CurrentWeapon = nullptr;
 
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeaponPath, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	FSoftObjectPath CurrentWeaponPath;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	TObjectPtr<UStaticMeshComponent> CurrentWeaponMesh = nullptr;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(ReplicatedUsing = OnRep_CombatState, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	EMHCombatState CombatState = EMHCombatState::Locomotion;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(ReplicatedUsing = OnRep_CombatState, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	EMHCombatMovePhase MovePhase = EMHCombatMovePhase::None;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	FName CurrentMoveId = NAME_None;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	float CurrentMoveTime = 0.f;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentMoveIndex, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	int32 CurrentMoveIndex = INDEX_NONE;
 	int32 CurrentWeaponIndex = INDEX_NONE;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	bool bComboWindowOpen = false;
 
 protected:
@@ -185,6 +190,15 @@ protected:
 	TArray<TWeakObjectPtr<AActor>> HitActorsThisMove;
 
 private:
+	UFUNCTION(Server, Reliable)
+	void Server_HandleComboInput(const FSoftObjectPath& InputActionPath, ETriggerEvent TriggerEvent, FVector2D MoveInput, float HoldDuration, int32 ClientInputSequence);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_StopMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex);
+
 	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction);
 	bool TryStartAttack(const FMHCombatInputSnapshot& Input);
 	bool BufferNextCombo(const FMHCombatInputSnapshot& Input);
@@ -194,6 +208,9 @@ private:
 	bool MatchesComboCondition(const FComboCondition& Condition, const FMHCombatInputSnapshot& Input) const;
 	void ClearBufferedComboInput();
 	void FinishCurrentMove(bool bInterrupted);
+	void PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate);
+	void StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex);
+	void UpdateWeaponMesh(UWeaponDataAsset* NewWeapon);
 	void ReleaseCharge();
 	void HandleAttackStart();
 	void PerformHitCheck();
@@ -206,6 +223,15 @@ private:
 	bool IsCurrentMontage(UAnimMontage* Montage) const;
 	bool IsComboInputAllowed() const;
 	bool CanStartBufferedCombo() const;
+
+	UFUNCTION()
+	void OnRep_CurrentWeaponPath();
+
+	UFUNCTION()
+	void OnRep_CombatState();
+
+	UFUNCTION()
+	void OnRep_CurrentMoveIndex();
 
 	UFUNCTION()
 	void HandleMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
@@ -224,5 +250,8 @@ private:
 	bool bIsChargeMove = false;
 	bool bIsCharging = false;
 	bool bChargeInputHeld = false;
-	
+	float PendingServerHoldDuration = -1.f;
+	int32 LocalInputSequence = 0;
+	int32 LastReceivedInputSequence = 0;
+
 };

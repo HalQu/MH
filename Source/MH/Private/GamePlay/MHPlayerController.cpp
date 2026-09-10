@@ -8,7 +8,7 @@
 
 AMHPlayerController::AMHPlayerController()
 {
-	bReplicates = false;
+	bReplicates = true;
 }
 
 void AMHPlayerController::BeginPlay()

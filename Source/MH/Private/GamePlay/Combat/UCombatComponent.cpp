@@ -6,6 +6,8 @@
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/OverlapResult.h"
+#include "InputAction.h"
+#include "Net/UnrealNetwork.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GamePlay/Combat/IMHCombatTargetInterface.h"
@@ -13,6 +15,7 @@
 
 UCombatComponent::UCombatComponent()
 {
+	SetIsReplicatedByDefault(true);
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 }
@@ -20,6 +23,18 @@ UCombatComponent::UCombatComponent()
 void UCombatComponent::InitializeComponent()
 {
 	Super::InitializeComponent();
+}
+
+void UCombatComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(UCombatComponent, CurrentWeaponPath);
+	DOREPLIFETIME(UCombatComponent, CombatState);
+	DOREPLIFETIME(UCombatComponent, MovePhase);
+	DOREPLIFETIME(UCombatComponent, CurrentMoveId);
+	DOREPLIFETIME(UCombatComponent, CurrentMoveIndex);
+	DOREPLIFETIME(UCombatComponent, bComboWindowOpen);
 }
 
 void UCombatComponent::BeginPlay()
@@ -45,7 +60,14 @@ void UCombatComponent::BeginPlay()
 
 	if (!CurrentWeapon)
 	{
-		EquipWeapon_Default();
+		if (GetOwner() && GetOwner()->HasAuthority())
+		{
+			EquipWeapon_Default();
+		}
+	}
+	else if (GetOwner() && GetOwner()->HasAuthority() && CurrentWeaponPath.IsNull())
+	{
+		CurrentWeaponPath = FSoftObjectPath(CurrentWeapon);
 	}
 }
 
@@ -73,7 +95,7 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent)
 {
-	if (!InputAction || !CachedCharacter || !CurrentWeapon || !GetWorld())
+	if (!InputAction || !CachedCharacter || !GetOwner() || !GetWorld())
 	{
 		return false;
 	}
@@ -100,7 +122,39 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 		AttackInputPressTimes.Remove(InputAction);
 	}
 
+	if (PendingServerHoldDuration >= 0.f)
+	{
+		HoldDuration = PendingServerHoldDuration;
+		PendingServerHoldDuration = -1.f;
+	}
+
 	const FMHCombatInputSnapshot InputSnapshot{InputAction, TriggerEvent, CurrentMoveInput, HoldDuration};
+	const ENetRole OwnerRole = GetOwner()->GetLocalRole();
+
+	if (OwnerRole == ROLE_AutonomousProxy && CachedCharacter->IsLocallyControlled())
+	{
+		if (CombatState == EMHCombatState::Attack
+			&& bIsChargeMove
+			&& TriggerEvent == ETriggerEvent::Completed
+			&& bChargeInputHeld)
+		{
+			if (bIsCharging && CachedAnimInstance && CurrentMoveData.Montage)
+			{
+				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate);
+			}
+			bIsCharging = false;
+			bChargeInputHeld = false;
+		}
+
+		++LocalInputSequence;
+		Server_HandleComboInput(FSoftObjectPath(InputAction), TriggerEvent, CurrentMoveInput, HoldDuration, LocalInputSequence);
+		return true;
+	}
+
+	if (OwnerRole != ROLE_Authority)
+	{
+		return false;
+	}
 
 	if (CombatState == EMHCombatState::Attack
 		&& bIsChargeMove
@@ -109,7 +163,7 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 		&& bChargeInputHeld)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] Charge input released for move: %s"), *CurrentMoveData.MoveId.ToString());
-		if (bIsCharging)
+		if (bIsCharging && CachedAnimInstance && CurrentMoveData.Montage)
 		{
 			//ReleaseCharge();
 			bIsCharging = false;
@@ -130,6 +184,27 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 	}
 
 	return false;
+}
+
+void UCombatComponent::Server_HandleComboInput_Implementation(const FSoftObjectPath& InputActionPath, ETriggerEvent TriggerEvent, FVector2D MoveInput, float HoldDuration, int32 ClientSequence)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || ClientSequence <= LastReceivedInputSequence)
+	{
+		return;
+	}
+
+	LastReceivedInputSequence = ClientSequence;
+	UInputAction* InputAction = Cast<UInputAction>(InputActionPath.TryLoad());
+	if (!InputAction)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Server received an unknown input action path: %s"), *InputActionPath.ToString());
+		return;
+	}
+
+	PendingServerHoldDuration = HoldDuration;
+	CurrentMoveInput = MoveInput;
+	HandleComboInput(InputAction, TriggerEvent);
+	PendingServerHoldDuration = -1.f;
 }
 
 bool UCombatComponent::TryStartAttack(const FMHCombatInputSnapshot& Input)
@@ -322,37 +397,10 @@ bool UCombatComponent::EquipWeapon(UWeaponDataAsset* NewWeapon)
 	}
 
 	CurrentWeapon = NewWeapon;
+	CurrentWeaponPath = FSoftObjectPath(NewWeapon);
 
-	if (NewWeapon->MeshAsset != nullptr)
-	{
-		if (CurrentWeaponMesh)
-		{
-			CurrentWeaponMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-			CurrentWeaponMesh->UnregisterComponent();
-			CurrentWeaponMesh->DestroyComponent();
-			CurrentWeaponMesh = nullptr;
-		}
-		CurrentWeaponMesh = NewObject<UStaticMeshComponent>(CachedCharacter);
-		if (!CurrentWeaponMesh) return false;
-
-		CurrentWeaponMesh->SetStaticMesh(NewWeapon->MeshAsset);
-
-		CurrentWeaponMesh->RegisterComponent();
-
-		USkeletalMeshComponent* SkeletalMesh = CachedCharacter->GetMesh();
-		if (SkeletalMesh)
-		{
-			CurrentWeaponMesh->AttachToComponent(
-				SkeletalMesh,
-				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-				DefaultHitOriginSocketName // 或 NewWeapon->SocketName
-			);
-		}
-
-		CurrentWeaponMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		CurrentWeaponMesh->SetVisibility(true);
-		UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] Equipped weapon: %s"), *NewWeapon->GetName());
-	}
+	UpdateWeaponMesh(NewWeapon);
+	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] Equipped weapon: %s"), *NewWeapon->GetName());
 	CurrentMoveIndex = INDEX_NONE;
 	CurrentMoveId = NAME_None;
 	OnWeaponChanged.Broadcast(CurrentWeapon);
@@ -423,6 +471,11 @@ bool UCombatComponent::RemoveWeaponFromLoadout(UWeaponDataAsset* Weapon)
 
 void UCombatComponent::HandleCombatNotify(EMHCombatNotifyType NotifyType, UAnimMontage* SourceMontage)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	if (CombatState != EMHCombatState::Attack || !IsCurrentMontage(SourceMontage))
 	{
 		return;
@@ -479,6 +532,10 @@ void UCombatComponent::HandleCombatNotifyState(EMHCombatNotifyStateType StateTyp
 		}
 		break;
 	case EMHCombatNotifyStateType::ComboWindow:
+		if (!GetOwner() || !GetOwner()->HasAuthority())
+		{
+			break;
+		}
 		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
 		{
 			bComboWindowPending = false;
@@ -498,6 +555,10 @@ void UCombatComponent::HandleCombatNotifyState(EMHCombatNotifyStateType StateTyp
 		}
 		break;
 	case EMHCombatNotifyStateType::WeaponSwitchAllowed:
+		if (!GetOwner() || !GetOwner()->HasAuthority())
+		{
+			break;
+		}
 		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
 		{
 			bWeaponSwitchAllowed = true;
@@ -560,6 +621,177 @@ bool UCombatComponent::CanSwitchWeaponNow() const
 	return bWeaponSwitchAllowed;
 }
 
+void UCombatComponent::OnRep_CurrentWeaponPath()
+{
+	if (CurrentWeaponPath.IsNull())
+	{
+		CurrentWeapon = nullptr;
+		UpdateWeaponMesh(nullptr);
+		return;
+	}
+
+	UWeaponDataAsset* NewWeapon = Cast<UWeaponDataAsset>(CurrentWeaponPath.TryLoad());
+	if (!NewWeapon)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Could not resolve replicated weapon path: %s"), *CurrentWeaponPath.ToString());
+		return;
+	}
+
+	if (CurrentWeapon != NewWeapon)
+	{
+		CurrentWeapon = NewWeapon;
+		OnWeaponChanged.Broadcast(CurrentWeapon);
+	}
+
+	UpdateWeaponMesh(NewWeapon);
+
+	OnRep_CurrentMoveIndex();
+}
+
+void UCombatComponent::OnRep_CombatState()
+{
+	OnCombatStateChanged.Broadcast(CombatState, MovePhase);
+}
+
+void UCombatComponent::OnRep_CurrentMoveIndex()
+{
+	if (CurrentMoveIndex == INDEX_NONE || !CurrentWeapon)
+	{
+		if (!GetOwner() || !GetOwner()->HasAuthority())
+		{
+			CurrentMoveData = FMHCombatMoveData();
+		}
+		return;
+	}
+
+	if (const FMHCombatMoveData* Move = GetMove(CurrentMoveIndex))
+	{
+		CurrentMoveData = *Move;
+	}
+}
+
+void UCombatComponent::UpdateWeaponMesh(UWeaponDataAsset* NewWeapon)
+{
+	if (CurrentWeaponMesh)
+	{
+		CurrentWeaponMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+		CurrentWeaponMesh->UnregisterComponent();
+		CurrentWeaponMesh->DestroyComponent();
+		CurrentWeaponMesh = nullptr;
+	}
+
+	if (!NewWeapon || !NewWeapon->MeshAsset || !CachedCharacter)
+	{
+		return;
+	}
+
+	CurrentWeaponMesh = NewObject<UStaticMeshComponent>(CachedCharacter);
+	if (!CurrentWeaponMesh)
+	{
+		return;
+	}
+
+	CurrentWeaponMesh->SetStaticMesh(NewWeapon->MeshAsset);
+	CurrentWeaponMesh->RegisterComponent();
+
+	if (USkeletalMeshComponent* SkeletalMesh = CachedCharacter->GetMesh())
+	{
+		CurrentWeaponMesh->AttachToComponent(
+			SkeletalMesh,
+			FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+			DefaultHitOriginSocketName);
+	}
+
+	CurrentWeaponMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CurrentWeaponMesh->SetVisibility(true);
+}
+
+void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate)
+{
+	if (!CachedCharacter || !MoveWeapon || !MoveWeapon->Moves.IsValidIndex(MoveIndex))
+	{
+		return;
+	}
+
+	const FMHCombatMoveData& Move = MoveWeapon->Moves[MoveIndex];
+	if (!Move.Montage)
+	{
+		return;
+	}
+
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		if (CurrentMoveData.Montage && CurrentMoveData.Montage != Move.Montage)
+		{
+			CachedCharacter->StopAnimMontage(CurrentMoveData.Montage);
+		}
+		CurrentMoveData = Move;
+		bIsChargeMove = Move.bIsChargeMove;
+		CurrentChargeInputAction = nullptr;
+		bChargeInputHeld = Move.bIsChargeMove;
+		bIsCharging = false;
+	}
+
+	BindMontageDelegates();
+	const FName PlaySection = SectionName.IsNone() ? Move.SectionName : SectionName;
+	CachedCharacter->PlayAnimMontage(Move.Montage, PlayRate, PlaySection);
+	OnAttackStarted.Broadcast(Move.MoveId);
+}
+
+void UCombatComponent::StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex)
+{
+	UAnimMontage* MontageToStop = nullptr;
+	if (MoveWeapon && MoveWeapon->Moves.IsValidIndex(MoveIndex))
+	{
+		MontageToStop = MoveWeapon->Moves[MoveIndex].Montage;
+	}
+
+	if (!MontageToStop)
+	{
+		MontageToStop = CurrentMoveData.Montage;
+	}
+
+	if (CachedCharacter && MontageToStop)
+	{
+		CachedCharacter->StopAnimMontage(MontageToStop);
+	}
+
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		CurrentMoveData = FMHCombatMoveData();
+		bIsChargeMove = false;
+		CurrentChargeInputAction = nullptr;
+		bIsCharging = false;
+		bChargeInputHeld = false;
+	}
+}
+
+void UCombatComponent::Multicast_PlayMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate)
+{
+	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
+	if (!MoveWeapon)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Could not resolve move weapon path: %s"), *WeaponPath.ToString());
+		return;
+	}
+
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		if (CurrentWeaponPath.IsNull() || CurrentWeaponPath == WeaponPath)
+		{
+			CurrentWeapon = MoveWeapon;
+		}
+	}
+
+	PlayMovePresentation(MoveWeapon, MoveIndex, SectionName, PlayRate);
+}
+
+void UCombatComponent::Multicast_StopMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex)
+{
+	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
+	StopMovePresentation(MoveWeapon, MoveIndex);
+}
+
 void UCombatComponent::OnMove(const FVector2D& MoveInput)
 {
 	CurrentMoveInput = MoveInput;
@@ -568,6 +800,11 @@ void UCombatComponent::OnMove(const FVector2D& MoveInput)
 bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction)
 {
 	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] StartMove() called with MoveId: %s, MoveIndex: %d"), *Move.MoveId.ToString(), MoveIndex);
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return false;
+	}
+
 	if (!CachedCharacter)
 	{
 		return false;
@@ -617,12 +854,7 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex,
 		: EMHCombatMovePhase::Startup;
 	SetCombatState(EMHCombatState::Attack, InitialPhase);
 
-	if (CurrentMoveData.Montage)
-	{
-		CachedCharacter->PlayAnimMontage(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate, CurrentMoveData.SectionName);
-	}
-
-	OnAttackStarted.Broadcast(CurrentMoveData.MoveId);
+	Multicast_PlayMove(CurrentWeaponPath, CurrentMoveIndex, CurrentMoveData.SectionName, CurrentMoveData.MontagePlayRate);
 	return true;
 }
 
@@ -673,12 +905,21 @@ const FMHCombatMoveData* UCombatComponent::GetMove(int32 MoveIndex) const
 
 void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	if (CombatState != EMHCombatState::Attack)
 	{
 		return;
 	}
 
 	UAnimMontage* PlayingMontage = CurrentMoveData.Montage;
+
+	const FSoftObjectPath MoveWeaponPath = CurrentWeaponPath;
+	const int32 MoveIndex = CurrentMoveIndex;
+	Multicast_StopMove(MoveWeaponPath, MoveIndex);
 
 	UpdateMovementLock(false);
 	SetCombatState(EMHCombatState::Locomotion, EMHCombatMovePhase::None);
@@ -934,6 +1175,11 @@ bool UCombatComponent::IsCurrentMontage(UAnimMontage* Montage) const
 
 void UCombatComponent::HandleMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	if (!IsCurrentMontage(Montage))
 	{
 		return;
@@ -944,6 +1190,11 @@ void UCombatComponent::HandleMontageBlendingOut(UAnimMontage* Montage, bool bInt
 
 void UCombatComponent::HandleMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
 	if (!IsCurrentMontage(Montage))
 	{
 		return;
