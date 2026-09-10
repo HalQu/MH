@@ -21,6 +21,7 @@ enum class EMHCombatMovePhase : uint8
 {
 	None UMETA(DisplayName = "None"),
 	Startup UMETA(DisplayName = "Startup"),
+	Charge UMETA(DisplayName = "Charge"),
 	Active UMETA(DisplayName = "Active"),
 	Recovery UMETA(DisplayName = "Recovery")
 };
@@ -28,12 +29,27 @@ enum class EMHCombatMovePhase : uint8
 UENUM(BlueprintType)
 enum class EMHCombatNotifyType : uint8
 {
+	AttackStart UMETA(DisplayName = "Attack Start"),
 	AttackHit UMETA(DisplayName = "Attack Hit"),
-	ComboWindowOpen UMETA(DisplayName = "Combo Window Open"),
-	ComboWindowClose UMETA(DisplayName = "Combo Window Close"),
 	RecoveryStart UMETA(DisplayName = "Recovery Start"),
+	MoveEnd UMETA(DisplayName = "Move End")
+};
+
+UENUM(BlueprintType)
+enum class EMHCombatNotifyStateType : uint8
+{
+	ChargeWindow UMETA(DisplayName = "Charge Window"),
+	ComboWindow UMETA(DisplayName = "Combo Window"),
 	WeaponSwitchAllowed UMETA(DisplayName = "Weapon Switch Allowed")
 };
+
+UENUM(BlueprintType)
+enum class EMHCombatNotifyStateEvent : uint8
+{
+	Begin UMETA(DisplayName = "Begin"),
+	End UMETA(DisplayName = "End")
+};
+
 USTRUCT(BlueprintType)
 struct FComboCondition
 {
@@ -67,7 +83,8 @@ struct FComboCondition
 	bool bCheckHoldDuration = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float MinHoldDuration = 0.0f; 
+	float MinHoldDuration = 0.0f;
+
 	// 1. 重载相等运算符 (TMap 查找键时使用)
 	bool operator==(const FComboCondition& Other) const
 	{
@@ -126,30 +143,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Move", meta = (ClampMin = "0.01"))
 	float MontagePlayRate = 1.f;
 
-	// These times are also used as the fallback while the montage asset is not configured yet.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float StartupTime = 0.10f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Charge")
+	bool bIsChargeMove = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float ActiveTime = 0.30f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float RecoveryTime = 0.20f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float HitMoment = 0.25f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float ComboWindowStart = 0.20f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float ComboWindowEnd = 0.45f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float CancelWindowStart = 0.25f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Timing", meta = (ClampMin = "0.0"))
-	float CancelWindowEnd = 0.45f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Charge", meta = (EditCondition = "bIsChargeMove"))
+	FName AttackSectionName = NAME_None;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Move")
 	bool bCanChain = true;
@@ -168,11 +166,6 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Hit")
 	FVector LaunchImpulse = FVector::ZeroVector;
-
-	float GetDuration() const
-	{
-		return StartupTime + ActiveTime + RecoveryTime;
-	}
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Combo")
 	TMap<FComboCondition, int32> ComboChain;

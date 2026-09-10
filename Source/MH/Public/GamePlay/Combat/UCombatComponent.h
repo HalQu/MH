@@ -67,7 +67,10 @@ public:
 	bool RemoveWeaponFromLoadout(UWeaponDataAsset* Weapon);
 
 	UFUNCTION(BlueprintCallable, Category = "Combat")
-	void HandleCombatNotify(EMHCombatNotifyType NotifyType);
+	void HandleCombatNotify(EMHCombatNotifyType NotifyType, UAnimMontage* SourceMontage);
+
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void HandleCombatNotifyState(EMHCombatNotifyStateType StateType, EMHCombatNotifyStateEvent StateEvent, UAnimMontage* SourceMontage);
 
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	UWeaponDataAsset* GetCurrentWeapon() const;
@@ -108,7 +111,7 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Combat|Events")
 	FMHCombatAttackEnded OnAttackEnded;
 
-	//input buffer
+
 	void OnMove(const FVector2D& MoveInput);
 
 protected:
@@ -152,7 +155,6 @@ protected:
 	int32 CurrentMoveIndex = INDEX_NONE;
 	int32 CurrentWeaponIndex = INDEX_NONE;
 
-
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	bool bComboWindowOpen = false;
 
@@ -172,6 +174,9 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimInstance> CachedAnimInstance = nullptr;
 
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> CurrentChargeInputAction = nullptr;
+
 	bool bHitExecuted = false;
 	bool bWeaponSwitchAllowed = false;
 	bool bMontageDelegatesBound = false;
@@ -180,7 +185,7 @@ protected:
 	TArray<TWeakObjectPtr<AActor>> HitActorsThisMove;
 
 private:
-	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex);
+	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction);
 	bool TryStartAttack(const FMHCombatInputSnapshot& Input);
 	bool BufferNextCombo(const FMHCombatInputSnapshot& Input);
 	bool TryStartNextCombo();
@@ -189,7 +194,8 @@ private:
 	bool MatchesComboCondition(const FComboCondition& Condition, const FMHCombatInputSnapshot& Input) const;
 	void ClearBufferedComboInput();
 	void FinishCurrentMove(bool bInterrupted);
-	void UpdateMoveTiming(float DeltaTime);
+	void ReleaseCharge();
+	void HandleAttackStart();
 	void PerformHitCheck();
 	void ApplyDamageToTarget(AActor* Target, const FVector& HitLocation, const FVector& HitNormal);
 	float ResolveDamage(const FMHCombatMoveData& MoveData) const;
@@ -198,7 +204,8 @@ private:
 	void BindMontageDelegates();
 	void UnbindMontageDelegates();
 	bool IsCurrentMontage(UAnimMontage* Montage) const;
-	float GetCurrentMoveDuration() const;
+	bool IsComboInputAllowed() const;
+	bool CanStartBufferedCombo() const;
 
 	UFUNCTION()
 	void HandleMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
@@ -206,9 +213,16 @@ private:
 	UFUNCTION()
 	void HandleMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	//input buffer
-	FVector2D CurrentMoveInput; 
+
+	FVector2D CurrentMoveInput;
 	FMHCombatInputSnapshot BufferedComboInput;
 	bool bHasBufferedComboInput = false;
+	bool bComboWindowPending = false;
+	bool bComboWindowClosed = false;
+	float ComboWindowCloseTime = 0.f;
 	TMap<UInputAction*, float> AttackInputPressTimes;
+	bool bIsChargeMove = false;
+	bool bIsCharging = false;
+	bool bChargeInputHeld = false;
+	
 };

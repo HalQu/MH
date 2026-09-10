@@ -35,6 +35,7 @@ void UCombatComponent::BeginPlay()
 
 	CachedMesh = CachedCharacter->GetMesh();
 	CachedMovement = CachedCharacter->GetCharacterMovement();
+	CachedAnimInstance = CachedMesh ? CachedMesh->GetAnimInstance() : nullptr;
 	BindMontageDelegates();
 
 	LoadoutWeapons.RemoveAll([](const TObjectPtr<UWeaponDataAsset>& Weapon)
@@ -54,6 +55,9 @@ void UCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	UpdateMovementLock(false);
 	AttackInputPressTimes.Reset();
 	ClearBufferedComboInput();
+	CurrentChargeInputAction = nullptr;
+	bIsCharging = false;
+	bChargeInputHeld = false;
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -61,13 +65,11 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (CombatState == EMHCombatState::Attack)
+	if (CombatState == EMHCombatState::Attack && CachedAnimInstance && CurrentMoveData.Montage)
 	{
-		UpdateMoveTiming(DeltaTime);
+		CurrentMoveTime = CachedAnimInstance->Montage_GetPosition(CurrentMoveData.Montage);
 	}
 }
-
-
 
 bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent)
 {
@@ -100,6 +102,23 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 
 	const FMHCombatInputSnapshot InputSnapshot{InputAction, TriggerEvent, CurrentMoveInput, HoldDuration};
 
+	if (CombatState == EMHCombatState::Attack
+		&& bIsChargeMove
+		&& TriggerEvent == ETriggerEvent::Completed
+		&& CurrentChargeInputAction.Get() == InputAction
+		&& bChargeInputHeld)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] Charge input released for move: %s"), *CurrentMoveData.MoveId.ToString());
+		if (bIsCharging)
+		{
+			//ReleaseCharge();
+			bIsCharging = false;
+			CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate);
+		}
+		bChargeInputHeld = false;
+		return true;
+	}
+	
 	if (CombatState == EMHCombatState::Locomotion || CombatState == EMHCombatState::WeaponSwitch)
 	{
 		return TryStartAttack(InputSnapshot);
@@ -115,6 +134,7 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 
 bool UCombatComponent::TryStartAttack(const FMHCombatInputSnapshot& Input)
 {
+	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] TryStartAttack() called with InputAction: %s, TriggerEvent: %d"), Input.InputAction ? *Input.InputAction->GetName() : TEXT("null"), static_cast<int32>(Input.TriggerEvent));
 	if (!CurrentWeapon)
 	{
 		return false;
@@ -128,7 +148,7 @@ bool UCombatComponent::TryStartAttack(const FMHCombatInputSnapshot& Input)
 	}
 
 	const FMHCombatMoveData* Move = GetMove(MoveIndex);
-	return Move && StartMove(*Move, MoveIndex);
+	return Move && StartMove(*Move, MoveIndex, Input.TriggerEvent == ETriggerEvent::Started ? Input.InputAction : nullptr);
 }
 
 bool UCombatComponent::BufferNextCombo(const FMHCombatInputSnapshot& Input)
@@ -144,8 +164,7 @@ bool UCombatComponent::BufferNextCombo(const FMHCombatInputSnapshot& Input)
 		return false;
 	}
 
-	const float InputDeadline = CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration;
-	if (CurrentMoveTime > InputDeadline)
+	if (!IsComboInputAllowed())
 	{
 		return false;
 	}
@@ -248,6 +267,7 @@ void UCombatComponent::ClearBufferedComboInput()
 	bHasBufferedComboInput = false;
 	BufferedComboInput = FMHCombatInputSnapshot();
 }
+
 bool UCombatComponent::CycleWeapon(int32 Delta)
 {
 	if (LoadoutWeapons.IsEmpty())
@@ -302,7 +322,7 @@ bool UCombatComponent::EquipWeapon(UWeaponDataAsset* NewWeapon)
 	}
 
 	CurrentWeapon = NewWeapon;
-	
+
 	if (NewWeapon->MeshAsset != nullptr)
 	{
 		if (CurrentWeaponMesh)
@@ -338,11 +358,13 @@ bool UCombatComponent::EquipWeapon(UWeaponDataAsset* NewWeapon)
 	OnWeaponChanged.Broadcast(CurrentWeapon);
 	return true;
 }
+
 bool UCombatComponent::EquipWeapon_Default()
 {
 	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] EquipWeapon_Default() called. Equipping default weapon."));
 	return EquipWeapon(DefaultWeapon);
 }
+
 void UCombatComponent::CancelCurrentAttack()
 {
 	FinishCurrentMove(true);
@@ -399,30 +421,91 @@ bool UCombatComponent::RemoveWeaponFromLoadout(UWeaponDataAsset* Weapon)
 	return true;
 }
 
-void UCombatComponent::HandleCombatNotify(EMHCombatNotifyType NotifyType)
+void UCombatComponent::HandleCombatNotify(EMHCombatNotifyType NotifyType, UAnimMontage* SourceMontage)
 {
-	if (CombatState != EMHCombatState::Attack)
+	if (CombatState != EMHCombatState::Attack || !IsCurrentMontage(SourceMontage))
 	{
 		return;
 	}
 
 	switch (NotifyType)
 	{
+	case EMHCombatNotifyType::AttackStart:
+		HandleAttackStart();
+		break;
 	case EMHCombatNotifyType::AttackHit:
-		PerformHitCheck();
-		break;
-	case EMHCombatNotifyType::ComboWindowOpen:
-		bComboWindowOpen = true;
-		TryStartNextCombo();
-		break;
-	case EMHCombatNotifyType::ComboWindowClose:
-		bComboWindowOpen = false;
+		if (MovePhase == EMHCombatMovePhase::Active)
+		{
+			PerformHitCheck();
+		}
 		break;
 	case EMHCombatNotifyType::RecoveryStart:
 		SetCombatState(CombatState, EMHCombatMovePhase::Recovery);
 		break;
-	case EMHCombatNotifyType::WeaponSwitchAllowed:
-		bWeaponSwitchAllowed = true;
+	case EMHCombatNotifyType::MoveEnd:
+		if (!TryStartNextCombo())
+		{
+			FinishCurrentMove(false);
+		}
+		break;
+	}
+}
+
+void UCombatComponent::HandleCombatNotifyState(EMHCombatNotifyStateType StateType, EMHCombatNotifyStateEvent StateEvent, UAnimMontage* SourceMontage)
+{
+	if (CombatState != EMHCombatState::Attack || !IsCurrentMontage(SourceMontage))
+	{
+		return;
+	}
+
+	switch (StateType)
+	{
+	case EMHCombatNotifyStateType::ChargeWindow:
+		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
+		{
+			if (CachedAnimInstance && CachedAnimInstance->Montage_IsPlaying(CurrentMoveData.Montage)&&bChargeInputHeld)
+			{
+				bIsCharging = true;
+				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate * 0.3f);
+			}
+		}
+		else if (StateEvent == EMHCombatNotifyStateEvent::End)
+		{
+			if (CachedAnimInstance && CachedAnimInstance->Montage_IsPlaying(CurrentMoveData.Montage)&& bIsCharging)
+			{
+				bIsCharging = false;
+				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate);
+			}
+		}
+		break;
+	case EMHCombatNotifyStateType::ComboWindow:
+		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
+		{
+			bComboWindowPending = false;
+			bComboWindowOpen = true;
+			bComboWindowClosed = false;
+			TryStartNextCombo();
+		}
+		else if (StateEvent == EMHCombatNotifyStateEvent::End)
+		{
+			bComboWindowOpen = false;
+			bComboWindowClosed = true;
+			if (UWorld* World = GetWorld())
+			{
+				ComboWindowCloseTime = World->GetTimeSeconds();
+			}
+			TryStartNextCombo();
+		}
+		break;
+	case EMHCombatNotifyStateType::WeaponSwitchAllowed:
+		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
+		{
+			bWeaponSwitchAllowed = true;
+		}
+		else if (StateEvent == EMHCombatNotifyStateEvent::End)
+		{
+			bWeaponSwitchAllowed = false;
+		}
 		break;
 	}
 }
@@ -474,10 +557,7 @@ bool UCombatComponent::CanSwitchWeaponNow() const
 		return true;
 	}
 
-	const bool bInCancelWindow = CurrentMoveTime >= CurrentMoveData.CancelWindowStart
-		&& CurrentMoveTime <= CurrentMoveData.CancelWindowEnd;
-
-	return bWeaponSwitchAllowed || bInCancelWindow;
+	return bWeaponSwitchAllowed;
 }
 
 void UCombatComponent::OnMove(const FVector2D& MoveInput)
@@ -485,9 +565,15 @@ void UCombatComponent::OnMove(const FVector2D& MoveInput)
 	CurrentMoveInput = MoveInput;
 }
 
-bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex)
+bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction)
 {
+	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] StartMove() called with MoveId: %s, MoveIndex: %d"), *Move.MoveId.ToString(), MoveIndex);
 	if (!CachedCharacter)
+	{
+		return false;
+	}
+
+	if (!Move.Montage)
 	{
 		return false;
 	}
@@ -504,8 +590,16 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex)
 	bHitExecuted = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
+	bComboWindowPending = true;
+	bComboWindowClosed = false;
+	ComboWindowCloseTime = 0.f;
 	HitActorsThisMove.Reset();
 
+	//bIsCharging = Move.bIsChargeMove;
+	bIsChargeMove = Move.bIsChargeMove;
+	CurrentChargeInputAction = Move.bIsChargeMove ? SourceInputAction : nullptr;
+	bChargeInputHeld = Move.bIsChargeMove && SourceInputAction != nullptr;
+	
 	if (bLockGroundMovementDuringAttack && !IsAirborne())
 	{
 		UpdateMovementLock(true);
@@ -518,7 +612,10 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex)
 		CachedCharacter->StopAnimMontage(PreviousMontage);
 	}
 
-	SetCombatState(EMHCombatState::Attack, EMHCombatMovePhase::Startup);
+	const EMHCombatMovePhase InitialPhase = Move.bIsChargeMove
+		? EMHCombatMovePhase::Charge
+		: EMHCombatMovePhase::Startup;
+	SetCombatState(EMHCombatState::Attack, InitialPhase);
 
 	if (CurrentMoveData.Montage)
 	{
@@ -529,7 +626,6 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex)
 	return true;
 }
 
-
 bool UCombatComponent::TryStartNextCombo()
 {
 	if (!bHasBufferedComboInput || !CurrentMoveData.bCanChain)
@@ -537,9 +633,7 @@ bool UCombatComponent::TryStartNextCombo()
 		return false;
 	}
 
-	const bool bCanStartChain = bComboWindowOpen
-		|| (CurrentMoveTime >= CurrentMoveData.ComboWindowStart
-			&& CurrentMoveTime <= CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration);
+	const bool bCanStartChain = CanStartBufferedCombo();
 
 	if (!bCanStartChain)
 	{
@@ -560,8 +654,11 @@ bool UCombatComponent::TryStartNextCombo()
 		return false;
 	}
 
+	UInputAction* SourceInputAction = BufferedComboInput.TriggerEvent == ETriggerEvent::Started
+		? BufferedComboInput.InputAction
+		: nullptr;
 	ClearBufferedComboInput();
-	return StartMove(*NextMove, NextMoveIndex);
+	return StartMove(*NextMove, NextMoveIndex, SourceInputAction);
 }
 
 const FMHCombatMoveData* UCombatComponent::GetMove(int32 MoveIndex) const
@@ -573,6 +670,7 @@ const FMHCombatMoveData* UCombatComponent::GetMove(int32 MoveIndex) const
 
 	return &CurrentWeapon->Moves[MoveIndex];
 }
+
 void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 {
 	if (CombatState != EMHCombatState::Attack)
@@ -593,7 +691,13 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 	bHitExecuted = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
+	bComboWindowPending = false;
+	bComboWindowClosed = false;
+	ComboWindowCloseTime = 0.f;
 	HitActorsThisMove.Reset();
+	CurrentChargeInputAction = nullptr;
+	bIsCharging = false;
+	bChargeInputHeld = false;
 
 	if (PlayingMontage && CachedCharacter)
 	{
@@ -603,61 +707,74 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 	OnAttackEnded.Broadcast(bInterrupted);
 }
 
-void UCombatComponent::UpdateMoveTiming(float DeltaTime)
+bool UCombatComponent::IsComboInputAllowed() const
 {
-	CurrentMoveTime += DeltaTime;
-
-	if (!bHitExecuted && CurrentMoveData.HitMoment >= 0.f && CurrentMoveTime >= CurrentMoveData.HitMoment)
+	if (!GetWorld())
 	{
-		PerformHitCheck();
+		return false;
 	}
 
-	if (CurrentMoveTime >= CurrentMoveData.ComboWindowStart && CurrentMoveTime <= CurrentMoveData.ComboWindowEnd)
+	if (bComboWindowPending || bComboWindowOpen)
 	{
-		if (!bComboWindowOpen)
+		return true;
+	}
+
+	return bComboWindowClosed
+		&& GetWorld()->GetTimeSeconds() - ComboWindowCloseTime <= AttackInputBufferDuration;
+}
+
+bool UCombatComponent::CanStartBufferedCombo() const
+{
+	if (bComboWindowOpen)
+	{
+		return true;
+	}
+
+	if (!bComboWindowClosed || !GetWorld())
+	{
+		return false;
+	}
+
+	return GetWorld()->GetTimeSeconds() - ComboWindowCloseTime <= AttackInputBufferDuration;
+}
+
+void UCombatComponent::ReleaseCharge()
+{
+	UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Releasing charge."));
+	if (!CachedAnimInstance || !CurrentMoveData.Montage)
+	{
+		if (!CachedAnimInstance)
 		{
-			bComboWindowOpen = true;
-			if (TryStartNextCombo())
-			{
-				return;
-			}
+			UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Cannot release charge: Missing AnimInstance."));
 		}
-	}
-	else if (CurrentMoveTime > CurrentMoveData.ComboWindowEnd)
-	{
-		bComboWindowOpen = false;
-	}
-
-	bWeaponSwitchAllowed = CurrentMoveTime >= CurrentMoveData.CancelWindowStart
-		&& CurrentMoveTime <= CurrentMoveData.CancelWindowEnd;
-
-	EMHCombatMovePhase NextPhase = EMHCombatMovePhase::Startup;
-	const float ActiveEnd = CurrentMoveData.StartupTime + CurrentMoveData.ActiveTime;
-	if (CurrentMoveTime >= ActiveEnd)
-	{
-		NextPhase = EMHCombatMovePhase::Recovery;
-	}
-	else if (CurrentMoveTime >= CurrentMoveData.StartupTime)
-	{
-		NextPhase = EMHCombatMovePhase::Active;
-	}
-
-	SetCombatState(CombatState, NextPhase);
-
-	if (bHasBufferedComboInput && CurrentMoveTime > CurrentMoveData.ComboWindowEnd + AttackInputBufferDuration)
-	{
-		ClearBufferedComboInput();
-	}
-
-	if (CurrentMoveTime >= GetCurrentMoveDuration())
-	{
-		FinishCurrentMove(false);
+		if (!CurrentMoveData.Montage)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Cannot release charge: Missing Montage."));
+		}
 		return;
 	}
 
-	if (bHasBufferedComboInput && bComboWindowOpen)
+	if (CurrentMoveData.AttackSectionName.IsNone())
 	{
-		TryStartNextCombo();
+		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Charge move is missing AttackSectionName."));
+		return;
+	}
+
+	CachedAnimInstance->Montage_JumpToSection(CurrentMoveData.AttackSectionName, CurrentMoveData.Montage);
+	if (bIsCharging)
+	{
+		HandleAttackStart();
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Charge released, jumped to section: %s"), *CurrentMoveData.AttackSectionName.ToString());
+	return;
+}
+
+void UCombatComponent::HandleAttackStart()
+{
+	bIsCharging = false;
+	if (MovePhase == EMHCombatMovePhase::Startup || MovePhase == EMHCombatMovePhase::Charge)
+	{
+		SetCombatState(CombatState, EMHCombatMovePhase::Active);
 	}
 }
 
@@ -813,20 +930,6 @@ void UCombatComponent::UnbindMontageDelegates()
 bool UCombatComponent::IsCurrentMontage(UAnimMontage* Montage) const
 {
 	return Montage && CurrentMoveData.Montage == Montage;
-}
-
-float UCombatComponent::GetCurrentMoveDuration() const
-{
-	const float FallbackDuration = FMath::Max(CurrentMoveData.GetDuration(), 0.01f);
-
-	if (!CurrentMoveData.Montage)
-	{
-		return FallbackDuration;
-	}
-
-	const float PlayRate = FMath::Max(CurrentMoveData.MontagePlayRate, 0.01f);
-	const float MontageDuration = CurrentMoveData.Montage->GetPlayLength() / PlayRate;
-	return FMath::Max(FallbackDuration, MontageDuration);
 }
 
 void UCombatComponent::HandleMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)

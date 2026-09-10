@@ -6,10 +6,9 @@
 #include "UMHCombatNotify.generated.h"
 
 /*
- * Event bridge from a montage timeline back into CombatComponent.
- * Keeps gameplay timing in the component and animation data in the montage.
+ * Single-frame event bridge from a montage timeline back into CombatComponent.
  */
-UCLASS(BlueprintType, meta = (DisplayName = "MH Combat Notify"))
+UCLASS(BlueprintType, Blueprintable, meta = (DisplayName = "MH Combat Notify"))
 class MH_API UMHCombatNotify : public UAnimNotify
 {
 	GENERATED_BODY()
@@ -18,5 +17,5 @@ public:
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, const FAnimNotifyEventReference& EventReference) override;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
-	EMHCombatNotifyType NotifyType = EMHCombatNotifyType::AttackHit;
+	EMHCombatNotifyType NotifyType = EMHCombatNotifyType::AttackStart;
 };
