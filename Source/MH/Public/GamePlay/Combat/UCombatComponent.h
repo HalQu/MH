@@ -208,6 +208,7 @@ private:
 	bool MatchesComboCondition(const FComboCondition& Condition, const FMHCombatInputSnapshot& Input) const;
 	void ClearBufferedComboInput();
 	void FinishCurrentMove(bool bInterrupted);
+	void CacheOwnerReferences();
 	void PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate);
 	void StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex);
 	void UpdateWeaponMesh(UWeaponDataAsset* NewWeapon);

@@ -13,6 +13,8 @@
 #include "GamePlay/Combat/IMHCombatTargetInterface.h"
 #include "GamePlay/Combat/UWeaponDataAsset.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogMHCombatNet, Log, All);
+
 UCombatComponent::UCombatComponent()
 {
 	SetIsReplicatedByDefault(true);
@@ -23,6 +25,34 @@ UCombatComponent::UCombatComponent()
 void UCombatComponent::InitializeComponent()
 {
 	Super::InitializeComponent();
+}
+
+void UCombatComponent::CacheOwnerReferences()
+{
+	if (!CachedCharacter)
+	{
+		CachedCharacter = Cast<ACharacter>(GetOwner());
+	}
+
+	if (!CachedCharacter)
+	{
+		return;
+	}
+
+	if (!CachedMesh)
+	{
+		CachedMesh = CachedCharacter->GetMesh();
+	}
+
+	if (!CachedMovement)
+	{
+		CachedMovement = CachedCharacter->GetCharacterMovement();
+	}
+
+	if (!CachedAnimInstance && CachedMesh)
+	{
+		CachedAnimInstance = CachedMesh->GetAnimInstance();
+	}
 }
 
 void UCombatComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -41,16 +71,31 @@ void UCombatComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	CachedCharacter = Cast<ACharacter>(GetOwner());
+	// Existing Blueprint component templates may still contain the old replication default.
+	const bool bWasReplicated = GetIsReplicated();
+	if (!GetIsReplicated())
+	{
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] Component replication flag was false at BeginPlay; enabling it now."));
+		SetIsReplicated(true);
+	}
+
+	CacheOwnerReferences();
 	if (!CachedCharacter)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Owner is not a character."));
 		return;
 	}
 
-	CachedMesh = CachedCharacter->GetMesh();
-	CachedMovement = CachedCharacter->GetCharacterMovement();
-	CachedAnimInstance = CachedMesh ? CachedMesh->GetAnimInstance() : nullptr;
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] BeginPlay Owner=%s NetMode=%d LocalRole=%d RemoteRole=%d Authority=%d LocallyControlled=%d ReplicatedBefore=%d Replicated=%d"),
+		*CachedCharacter->GetName(),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		static_cast<int32>(CachedCharacter->GetLocalRole()),
+		static_cast<int32>(CachedCharacter->GetRemoteRole()),
+		CachedCharacter->HasAuthority() ? 1 : 0,
+		CachedCharacter->IsLocallyControlled() ? 1 : 0,
+		bWasReplicated ? 1 : 0,
+		GetIsReplicated() ? 1 : 0);
 	BindMontageDelegates();
 
 	LoadoutWeapons.RemoveAll([](const TObjectPtr<UWeaponDataAsset>& Weapon)
@@ -58,16 +103,23 @@ void UCombatComponent::BeginPlay()
 		return !Weapon;
 	});
 
-	if (!CurrentWeapon)
+	if (!CurrentWeapon && !CurrentWeaponPath.IsNull())
 	{
-		if (GetOwner() && GetOwner()->HasAuthority())
-		{
-			EquipWeapon_Default();
-		}
+		CurrentWeapon = Cast<UWeaponDataAsset>(CurrentWeaponPath.TryLoad());
 	}
-	else if (GetOwner() && GetOwner()->HasAuthority() && CurrentWeaponPath.IsNull())
+
+	if (CurrentWeapon)
 	{
-		CurrentWeaponPath = FSoftObjectPath(CurrentWeapon);
+		if (GetOwner() && GetOwner()->HasAuthority() && CurrentWeaponPath.IsNull())
+		{
+			CurrentWeaponPath = FSoftObjectPath(CurrentWeapon);
+		}
+
+		UpdateWeaponMesh(CurrentWeapon);
+	}
+	else if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		EquipWeapon_Default();
 	}
 }
 
@@ -99,6 +151,17 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 	{
 		return false;
 	}
+
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] HandleComboInput Owner=%s NetMode=%d LocalRole=%d Authority=%d LocallyControlled=%d Action=%s Trigger=%d State=%d"),
+		*CachedCharacter->GetName(),
+		static_cast<int32>(GetWorld()->GetNetMode()),
+		static_cast<int32>(GetOwner()->GetLocalRole()),
+		GetOwner()->HasAuthority() ? 1 : 0,
+		CachedCharacter->IsLocallyControlled() ? 1 : 0,
+		*InputAction->GetName(),
+		static_cast<int32>(TriggerEvent),
+		static_cast<int32>(CombatState));
 
 	const float CurrentTime = GetWorld()->GetTimeSeconds();
 	float HoldDuration = 0.f;
@@ -147,12 +210,14 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 		}
 
 		++LocalInputSequence;
+		UE_LOG(LogMHCombatNet, Log, TEXT("[CombatNet] Sending Server_HandleComboInput Sequence=%d Action=%s Trigger=%d"), LocalInputSequence, *InputAction->GetName(), static_cast<int32>(TriggerEvent));
 		Server_HandleComboInput(FSoftObjectPath(InputAction), TriggerEvent, CurrentMoveInput, HoldDuration, LocalInputSequence);
 		return true;
 	}
 
 	if (OwnerRole != ROLE_Authority)
 	{
+		UE_LOG(LogMHCombatNet, Verbose, TEXT("[CombatNet] HandleComboInput ignored on simulated proxy. Owner=%s"), *CachedCharacter->GetName());
 		return false;
 	}
 
@@ -188,8 +253,27 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 
 void UCombatComponent::Server_HandleComboInput_Implementation(const FSoftObjectPath& InputActionPath, ETriggerEvent TriggerEvent, FVector2D MoveInput, float HoldDuration, int32 ClientSequence)
 {
-	if (!GetOwner() || !GetOwner()->HasAuthority() || ClientSequence <= LastReceivedInputSequence)
+	AActor* Owner = GetOwner();
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] Server_HandleComboInput received Owner=%s NetMode=%d LocalRole=%d Authority=%d Sequence=%d LastSequence=%d Action=%s Trigger=%d Hold=%.3f"),
+		Owner ? *Owner->GetName() : TEXT("null"),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		Owner ? static_cast<int32>(Owner->GetLocalRole()) : -1,
+		Owner && Owner->HasAuthority() ? 1 : 0,
+		ClientSequence,
+		LastReceivedInputSequence,
+		*InputActionPath.ToString(),
+		static_cast<int32>(TriggerEvent),
+		HoldDuration);
+	if (!Owner || !Owner->HasAuthority())
 	{
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] Server_HandleComboInput rejected: no authority."));
+		return;
+	}
+
+	if (ClientSequence <= LastReceivedInputSequence)
+	{
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] Server_HandleComboInput rejected: stale sequence %d <= %d."), ClientSequence, LastReceivedInputSequence);
 		return;
 	}
 
@@ -623,6 +707,7 @@ bool UCombatComponent::CanSwitchWeaponNow() const
 
 void UCombatComponent::OnRep_CurrentWeaponPath()
 {
+	CacheOwnerReferences();
 	if (CurrentWeaponPath.IsNull())
 	{
 		CurrentWeapon = nullptr;
@@ -708,14 +793,22 @@ void UCombatComponent::UpdateWeaponMesh(UWeaponDataAsset* NewWeapon)
 
 void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate)
 {
+	CacheOwnerReferences();
 	if (!CachedCharacter || !MoveWeapon || !MoveWeapon->Moves.IsValidIndex(MoveIndex))
 	{
+		UE_LOG(LogMHCombatNet, Warning,
+			TEXT("[CombatNet] PlayMovePresentation aborted. Owner=%s Character=%d Weapon=%d MoveIndex=%d"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
+			CachedCharacter ? 1 : 0,
+			MoveWeapon ? 1 : 0,
+			MoveIndex);
 		return;
 	}
 
 	const FMHCombatMoveData& Move = MoveWeapon->Moves[MoveIndex];
 	if (!Move.Montage)
 	{
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] PlayMovePresentation aborted: montage is null. Owner=%s MoveIndex=%d"), *CachedCharacter->GetName(), MoveIndex);
 		return;
 	}
 
@@ -734,7 +827,22 @@ void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 
 
 	BindMontageDelegates();
 	const FName PlaySection = SectionName.IsNone() ? Move.SectionName : SectionName;
-	CachedCharacter->PlayAnimMontage(Move.Montage, PlayRate, PlaySection);
+	const float PlayLength = CachedCharacter->PlayAnimMontage(Move.Montage, PlayRate, PlaySection);
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] PlayMovePresentation Owner=%s NetMode=%d LocalRole=%d Authority=%d MoveIndex=%d Section=%s Montage=%s PlayRate=%.3f PlayLength=%.3f"),
+		*CachedCharacter->GetName(),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		static_cast<int32>(GetOwner() ? GetOwner()->GetLocalRole() : ROLE_None),
+		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
+		MoveIndex,
+		*PlaySection.ToString(),
+		*Move.Montage->GetName(),
+		PlayRate,
+		PlayLength);
+	if (PlayLength <= 0.f)
+	{
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] PlayAnimMontage failed. Owner=%s Montage=%s"), *CachedCharacter->GetName(), *Move.Montage->GetName());
+	}
 	OnAttackStarted.Broadcast(Move.MoveId);
 }
 
@@ -768,10 +876,24 @@ void UCombatComponent::StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 
 
 void UCombatComponent::Multicast_PlayMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate)
 {
+	CacheOwnerReferences();
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] Multicast_PlayMove received Owner=%s NetMode=%d LocalRole=%d Authority=%d LocallyControlled=%d Replicated=%d WeaponPath=%s MoveIndex=%d Section=%s PlayRate=%.3f"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		GetOwner() ? static_cast<int32>(GetOwner()->GetLocalRole()) : -1,
+		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
+		CachedCharacter && CachedCharacter->IsLocallyControlled() ? 1 : 0,
+		GetIsReplicated() ? 1 : 0,
+		*WeaponPath.ToString(),
+		MoveIndex,
+		*SectionName.ToString(),
+		PlayRate);
+
 	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
 	if (!MoveWeapon)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] Could not resolve move weapon path: %s"), *WeaponPath.ToString());
+		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] Multicast_PlayMove could not resolve weapon path: %s"), *WeaponPath.ToString());
 		return;
 	}
 
@@ -788,6 +910,13 @@ void UCombatComponent::Multicast_PlayMove_Implementation(const FSoftObjectPath& 
 
 void UCombatComponent::Multicast_StopMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex)
 {
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] Multicast_StopMove received Owner=%s NetMode=%d LocalRole=%d Authority=%d MoveIndex=%d"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		GetOwner() ? static_cast<int32>(GetOwner()->GetLocalRole()) : -1,
+		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
+		MoveIndex);
 	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
 	StopMovePresentation(MoveWeapon, MoveIndex);
 }
@@ -799,12 +928,21 @@ void UCombatComponent::OnMove(const FVector2D& MoveInput)
 
 bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction)
 {
-	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] StartMove() called with MoveId: %s, MoveIndex: %d"), *Move.MoveId.ToString(), MoveIndex);
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] StartMove Owner=%s NetMode=%d LocalRole=%d Authority=%d Replicated=%d MoveId=%s MoveIndex=%d"),
+		GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
+		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
+		GetOwner() ? static_cast<int32>(GetOwner()->GetLocalRole()) : -1,
+		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
+		GetIsReplicated() ? 1 : 0,
+		*Move.MoveId.ToString(),
+		MoveIndex);
 	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
 		return false;
 	}
 
+	CacheOwnerReferences();
 	if (!CachedCharacter)
 	{
 		return false;

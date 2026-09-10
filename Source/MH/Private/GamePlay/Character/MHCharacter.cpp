@@ -57,14 +57,13 @@ void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 		EnhancedInput->BindAction(IA_Look, ETriggerEvent::Triggered, this, &AMHCharacter::Look);
 		if (IA_Attack_Y)
 		{
+			// Triggered fires every frame while held; attacks are edge-driven.
 			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Started, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Started);
-			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Triggered, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Triggered);
 			EnhancedInput->BindAction(IA_Attack_Y, ETriggerEvent::Completed, this, &AMHCharacter::HandleAttackInput, IA_Attack_Y, ETriggerEvent::Completed);
 		}
 		if (IA_Attack_B)
 		{
 			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Started, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Started);
-			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Triggered, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Triggered);
 			EnhancedInput->BindAction(IA_Attack_B, ETriggerEvent::Completed, this, &AMHCharacter::HandleAttackInput, IA_Attack_B, ETriggerEvent::Completed);
 		}
 
