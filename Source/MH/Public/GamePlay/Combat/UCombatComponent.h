@@ -27,6 +27,18 @@ struct FMHCombatInputSnapshot
 	ETriggerEvent TriggerEvent = ETriggerEvent::None;
 	FVector2D MoveInput = FVector2D::ZeroVector;
 	float HoldDuration = 0.f;
+	int32 ClientInputSequence = INDEX_NONE;
+};
+
+struct FMHCombatPredictedMove
+{
+	int32 InputSequence = INDEX_NONE;
+	FSoftObjectPath WeaponPath;
+	int32 MoveIndex = INDEX_NONE;
+	FName SectionName = NAME_None;
+	float PlayRate = 1.f;
+	float StartTime = 0.f;
+	UAnimMontage* Montage = nullptr;
 };
 
 /*
@@ -135,6 +147,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Settings", meta = (ClampMin = "0.0"))
 	float DamageMultiplier = 1.f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Network", meta = (ClampMin = "0.1"))
+	float MovePredictionTimeout = 0.75f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	TObjectPtr<UWeaponDataAsset> CurrentWeapon = nullptr;
 
@@ -194,13 +209,16 @@ private:
 	void Server_HandleComboInput(const FSoftObjectPath& InputActionPath, ETriggerEvent TriggerEvent, FVector2D MoveInput, float HoldDuration, int32 ClientInputSequence);
 
 	UFUNCTION(NetMulticast, Reliable)
-	void Multicast_PlayMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate);
+	void Multicast_PlayMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate, int32 ClientInputSequence);
 
 	UFUNCTION(NetMulticast, Reliable)
 	void Multicast_StopMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex);
 
-	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction);
+	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction, int32 ClientInputSequence);
 	bool TryStartAttack(const FMHCombatInputSnapshot& Input);
+	bool TryPredictMove(const FMHCombatInputSnapshot& Input, bool bChargeRelease);
+	void ConfirmPredictedMove(int32 ClientInputSequence, const FSoftObjectPath& WeaponPath, int32 MoveIndex);
+	void CancelPredictedMove(bool bTimedOut);
 	bool BufferNextCombo(const FMHCombatInputSnapshot& Input);
 	bool TryStartNextCombo();
 	const FMHCombatMoveData* GetMove(int32 MoveIndex) const;
@@ -229,7 +247,7 @@ private:
 	void OnRep_CurrentWeaponPath();
 
 	UFUNCTION()
-	void OnRep_CombatState();
+	void OnRep_CombatState() const;
 
 	UFUNCTION()
 	void OnRep_CurrentMoveIndex();
@@ -254,5 +272,8 @@ private:
 	float PendingServerHoldDuration = -1.f;
 	int32 LocalInputSequence = 0;
 	int32 LastReceivedInputSequence = 0;
+	int32 PendingServerInputSequence = INDEX_NONE;
+	FMHCombatPredictedMove PendingPredictedMove;
+	bool bHasPendingPredictedMove = false;
 
 };
