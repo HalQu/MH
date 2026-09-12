@@ -6,6 +6,8 @@
 #include "GameFramework/GameMode.h"
 #include "MHGameMode_Hunting.generated.h"
 
+class APlayerController;
+
 /**
  * 
  */
@@ -15,6 +17,7 @@ class MH_API AMHGameMode_Hunting : public AGameMode
 	GENERATED_BODY()
 public:
 	virtual void BeginPlay() override;
+	virtual void PostLogin(APlayerController* NewPlayer) override;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screen")
 	TSubclassOf<class UBaseScreen> HuntingHUDClass;
 };

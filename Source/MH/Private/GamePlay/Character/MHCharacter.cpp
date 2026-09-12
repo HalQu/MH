@@ -8,6 +8,7 @@
 #include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GamePlay/Combat/UCombatComponent.h"
+#include "GamePlay/Combat/UHealthComponent.h"
 // Sets default values
 AMHCharacter::AMHCharacter()
 {
@@ -33,6 +34,7 @@ AMHCharacter::AMHCharacter()
 	Camera->bUsePawnControlRotation = false; // prevents camera from moving independently
 
 	CombatComponent = CreateDefaultSubobject<UCombatComponent>(TEXT("CombatComponent"));
+	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 
 	bUseControllerRotationYaw = false;
 	GetCharacterMovement()->bOrientRotationToMovement = true;
@@ -44,7 +46,27 @@ AMHCharacter::AMHCharacter()
 void AMHCharacter::BeginPlay()
 {
 	Super::BeginPlay();
-	
+	if (HealthComponent)
+	{
+		HealthComponent->OnDeath.AddDynamic(this, &AMHCharacter::HandleDeath);
+	}
+}
+
+void AMHCharacter::ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent)
+{
+	if (HealthComponent)
+	{
+		HealthComponent->ApplyDamage(DamageEvent);
+	}
+}
+
+void AMHCharacter::HandleDeath()
+{
+	// 死亡后不再接受输入、也不再开新动作；进行中的动作由组件自己收尾。
+	if (CombatComponent)
+	{
+		CombatComponent->SetCombatEnabled(false);
+	}
 }
 
 void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)

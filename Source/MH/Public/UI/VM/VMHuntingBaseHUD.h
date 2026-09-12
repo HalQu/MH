@@ -5,8 +5,11 @@
 #include "CoreMinimal.h"
 #include "UI/Core/BaseViewModel.h"
 #include "UI/Core/Observable.h"
-#include "GamePlay/MHPlayerState.h"
 #include "VMHuntingBaseHUD.generated.h"
+
+class UHealthComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMHHealthPercentChanged, float, NewPercent);
 
 /**
  * 
@@ -16,13 +19,26 @@ class MH_API UVMHuntingBaseHUD : public UBaseViewModel
 {
 	GENERATED_BODY()
 public:
-    TBindedValue<float> HealthPercent;   
+    TBindedValue<float> HealthPercent;
 
-    virtual void RefreshAll() override   
-    {
-        if (AMHPlayerState* PS = GetDataSource<AMHPlayerState>())
-        {
-            HealthPercent.Set(PS->MaxHealth > 0 ? PS->CurrentHealth / PS->MaxHealth : 0.f);
-        }
-    }
+    UPROPERTY(BlueprintAssignable, Category = "UI|Health")
+    FMHHealthPercentChanged OnHealthPercentChanged;
+
+    UFUNCTION(BlueprintPure, Category = "UI|Health")
+    float GetHealthPercentValue() const { return HealthPercent.Get(); }
+
+    virtual void OnActivated() override;
+    virtual void OnDeactivated() override;
+    virtual void RefreshAll() override;
+
+private:
+    UHealthComponent* ResolveHealthComponent() const;
+    void BindHealthComponent(UHealthComponent* HealthComponent);
+    void UnbindHealthComponent();
+    void SetHealthPercent(float NewPercent);
+
+    UFUNCTION()
+    void HandleHealthChanged(float NewHealth, float MaxHealth);
+
+    TWeakObjectPtr<UHealthComponent> BoundHealthComponent;
 };

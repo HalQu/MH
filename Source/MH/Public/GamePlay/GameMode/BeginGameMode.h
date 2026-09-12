@@ -6,6 +6,8 @@
 #include "GameFramework/GameMode.h"
 #include "BeginGameMode.generated.h"
 
+class APlayerController;
+
 /**
  * 
  */
@@ -14,7 +16,12 @@ class MH_API ABeginGameMode : public AGameMode
 {
 	GENERATED_BODY()
 public:
+	ABeginGameMode();
+
 	virtual void BeginPlay() override;
+	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screen")
 	TSubclassOf<class UBaseScreen> MainMenuScreenClass;
 };

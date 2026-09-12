@@ -29,5 +29,11 @@ public:
         BIND_VM_PROPERTY(VM, HealthPercent, &USHuntingBaseHUD::SetHealthBar);
     }
 
-    void SetHealthBar(float Percent) { HealthBar->SetPercent(Percent); }
+    void SetHealthBar(float Percent)
+    {
+        if (HealthBar)
+        {
+            HealthBar->SetPercent(FMath::Clamp(Percent, 0.f, 1.f));
+        }
+    }
 };

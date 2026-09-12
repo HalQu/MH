@@ -173,7 +173,7 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent TriggerEvent)
 {
-	if (!InputAction || !CachedCharacter || !GetOwner() || !GetWorld())
+	if (!bCombatEnabled || !InputAction || !CachedCharacter || !GetOwner() || !GetWorld())
 	{
 		return false;
 	}
@@ -683,6 +683,11 @@ bool UCombatComponent::CycleWeapon(int32 Delta)
 bool UCombatComponent::EquipWeapon(UWeaponDataAsset* NewWeapon)
 {
 	UE_LOG(LogTemp, Log, TEXT("[UCombatComponent] EquipWeapon() called with NewWeapon: %s"), NewWeapon ? *NewWeapon->GetName() : TEXT("null"));
+	if (!bCombatEnabled)
+	{
+		return false;
+	}
+
 	if (!NewWeapon)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[UCombatComponent] EquipWeapon() called with null NewWeapon."));
@@ -726,6 +731,28 @@ bool UCombatComponent::EquipWeapon_Default()
 void UCombatComponent::CancelCurrentAttack()
 {
 	FinishCurrentMove(true);
+}
+
+void UCombatComponent::SetCombatEnabled(bool bEnabled)
+{
+	if (bCombatEnabled == bEnabled)
+	{
+		return;
+	}
+
+	bCombatEnabled = bEnabled;
+	if (bEnabled)
+	{
+		return;
+	}
+
+	ClearBufferedComboInput();
+	CancelPredictedMove(false, false);
+
+	if (GetOwner() && GetOwner()->HasAuthority() && CombatState == EMHCombatState::Attack)
+	{
+		FinishCurrentMove(true);
+	}
 }
 
 bool UCombatComponent::AddWeaponToLoadout(UWeaponDataAsset* Weapon)
@@ -1521,6 +1548,13 @@ void UCombatComponent::PerformHitCheck()
 	TArray<FOverlapResult> Overlaps;
 	if (!GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity, ECC_Pawn, HitShape, QueryParams))
 	{
+		UE_LOG(LogMHCombatNet, Log,
+			TEXT("[CombatNet] Hit check found no overlap. Attacker=%s Move=%s Socket=%s Origin=%s Radius=%.1f"),
+			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
+			*CurrentMoveData.MoveId.ToString(),
+			*SocketName.ToString(),
+			*Origin.ToString(),
+			Radius);
 		return;
 	}
 
@@ -1556,6 +1590,13 @@ void UCombatComponent::ApplyDamageToTarget(AActor* Target, const FVector& HitLoc
 	DamageEvent.LaunchImpulse = CurrentMoveData.LaunchImpulse;
 
 	IMHCombatTargetInterface::Execute_ReceiveDamage(Target, DamageEvent);
+
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] Hit resolved Attacker=%s Target=%s Move=%s RequestedDamage=%.2f"),
+		CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
+		*Target->GetName(),
+		*CurrentMoveData.MoveId.ToString(),
+		DamageEvent.Damage);
 }
 
 float UCombatComponent::ResolveDamage(const FMHCombatMoveData& MoveData) const

@@ -85,6 +85,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	void CancelCurrentAttack();
 
+	/** 关闭后不再接受输入、不再开新动作；进行中的动作会被中断（服务器）。 */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void SetCombatEnabled(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	bool IsCombatEnabled() const { return bCombatEnabled; }
+
 	UFUNCTION(BlueprintCallable, Category = "Combat")
 	bool AddWeaponToLoadout(UWeaponDataAsset* Weapon);
 
@@ -310,6 +317,9 @@ private:
 
 	/** 本地是否已经播出过一帧动作画面，用于保证 AttackStarted/Ended 成对。 */
 	bool bPresentationActive = false;
+
+	/** 死亡等状态下整体关闭战斗，避免继续接受输入。 */
+	bool bCombatEnabled = true;
 
 	/** 本机控制的客户端已预测松手，在服务器确认前不被旧的蓄力状态拉回去。 */
 	bool bChargeReleasePredicted = false;

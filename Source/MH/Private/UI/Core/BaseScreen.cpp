@@ -1,23 +1,25 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "UI/Core/BaseScreen.h"
+
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerState.h"
 #include "UI/Core/BaseViewModel.h"
 #include "UI/Core/UIManager.h"
-#include "GameFramework/PlayerState.h"
 
 void UBaseScreen::OnOpen(UObject* Param)
 {
+    if (bIsOpen)
+    {
+        return;
+    }
+
     bIsOpen = true;
     bIsTopmost = true;
 
-    // 1. 创建 ViewModel
     if (ViewModelClass && !ViewModel)
     {
         ViewModel = NewObject<UBaseViewModel>(this, ViewModelClass);
     }
 
-    // 2. 初始化 ViewModel
     if (ViewModel)
     {
         ViewModel->Initialize(this, GetDataSource());
@@ -25,14 +27,18 @@ void UBaseScreen::OnOpen(UObject* Param)
         ViewModel->RefreshAll();
     }
 
-    // 3. 播放打开动画
     PlayOpenAnimation();
+    BP_OnOpened(Param);
 }
 
 void UBaseScreen::OnCovered()
 {
-    bIsTopmost = false;
+    if (!bIsOpen || !bIsTopmost)
+    {
+        return;
+    }
 
+    bIsTopmost = false;
     SetVisibility(ESlateVisibility::HitTestInvisible);
     SetIsEnabled(false);
 
@@ -40,12 +46,18 @@ void UBaseScreen::OnCovered()
     {
         ViewModel->OnDeactivated();
     }
+
+    BP_OnCovered();
 }
 
 void UBaseScreen::OnRevealed()
 {
-    bIsTopmost = true;
+    if (!bIsOpen || bIsTopmost)
+    {
+        return;
+    }
 
+    bIsTopmost = true;
     SetVisibility(ESlateVisibility::Visible);
     SetIsEnabled(true);
 
@@ -54,11 +66,25 @@ void UBaseScreen::OnRevealed()
         ViewModel->OnActivated();
         ViewModel->RefreshAll();
     }
+
+    BP_OnRevealed();
 }
 
 void UBaseScreen::OnClose()
 {
+    if (!bIsOpen)
+    {
+        return;
+    }
+
+    // 先落状态，防止蓝图关闭事件再次调用 OnClose 造成重入。
     bIsOpen = false;
+    bIsTopmost = false;
+    SetVisibility(ESlateVisibility::HitTestInvisible);
+    SetIsEnabled(false);
+
+    BP_OnClosed();
+
 
     if (ViewModel)
     {
@@ -67,9 +93,55 @@ void UBaseScreen::OnClose()
     }
 
     PlayCloseAnimation();
+}
 
-    // 不在这里移除自己：UIManager 的 PendingRemovals 会在 CloseAnimDuration 后统一移除，
-    // 保证关闭动画完整播完，也避免和 UIManager 重复移除。
+void UBaseScreen::OnBack_Implementation()
+{
+    if (UUIManager* Manager = GetUIManager())
+    {
+        Manager->HandleBack();
+    }
+}
+
+UObject* UBaseScreen::GetDataSource() const
+{
+    if (APlayerController* PlayerController = GetOwningPlayer())
+    {
+        return PlayerController->GetPlayerState<APlayerState>();
+    }
+
+    return nullptr;
+}
+
+void UBaseScreen::RefreshDataContext()
+{
+    if (!ViewModel)
+    {
+        return;
+    }
+
+    ViewModel->SetDataSource(GetDataSource());
+    // 被覆盖的页面只更新数据源；恢复显示时 OnRevealed 会再刷新一次。
+    if (ViewModel->IsActive())
+    {
+        ViewModel->RefreshAll();
+    }
+    BP_OnDataContextChanged();
+}
+
+void UBaseScreen::SetInputModePolicy(EUIScreenInputMode NewInputMode)
+{
+    InputModePolicy = NewInputMode;
+}
+
+UUIManager* UBaseScreen::GetUIManager() const
+{
+    if (ULocalPlayer* LocalPlayer = GetOwningLocalPlayer())
+    {
+        return LocalPlayer->GetSubsystem<UUIManager>();
+    }
+
+    return nullptr;
 }
 
 FReply UBaseScreen::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
@@ -84,24 +156,26 @@ FReply UBaseScreen::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent
     return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
 }
 
-void UBaseScreen::OnBack()
+void UBaseScreen::NativeDestruct()
 {
-    if (OwnerUIManager)
+    // 页面可能被外部销毁而不是经过 UIManager::CloseScreen，这里兜底解绑。
+    if (ViewModel)
     {
-        OwnerUIManager->HandleBack();
+        ViewModel->OnDestroy();
+        ViewModel = nullptr;
     }
+
+    bIsOpen = false;
+    bIsTopmost = false;
+
+    if (UUIManager* Manager = GetUIManager())
+    {
+        Manager->NotifyScreenDestroyed(this);
+    }
+
+    Super::NativeDestruct();
 }
 
-UObject* UBaseScreen::GetDataSource() const
-{
-    if (APlayerController* PC = GetOwningPlayer())
-    {
-        return PC->GetPlayerState<APlayerState>();
-    }
-    return nullptr;
-}
-
-// BlueprintNativeEvent 的 C++ 默认实现（蓝图未重写时使用）
 void UBaseScreen::PlayOpenAnimation_Implementation()
 {
 }

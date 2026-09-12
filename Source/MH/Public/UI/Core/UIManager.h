@@ -1,183 +1,178 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/WorldSubsystem.h"
+#include "Subsystems/LocalPlayerSubsystem.h"
+#include "Tickable.h"
+#include "UI/Core/UIScreenTypes.h"
 #include "UIManager.generated.h"
 
+class APlayerController;
+class APawn;
 class UBaseScreen;
+class ULocalPlayer;
 
 /**
- * EUILayer — 界面层级
+ * UIManager - 本地玩家 UI 调度器
  *
- * ZOrder 从低到高，高层盖住低层。
- * HUD 是常驻层，不走页面栈。Screen/Popup/Overlay 每层有独立的压栈。
- */
-UENUM(BlueprintType)
-enum class EUILayer : uint8
-{
-    World = 0,    // 3D 空间 UI（伤害数字、怪物名字）— 预留，暂无 API
-    HUD = 10,     // 常驻 HUD（血量、耐力、道具栏）— 不压栈
-    Screen = 20,  // 全屏界面（菜单、装备箱）— 压栈管理
-    Popup = 30,   // 弹窗（确认框、对话框）— 压栈管理
-    Overlay = 40, // 最高层（加载界面、暂停）— 压栈管理
-};
-
-/**
- * UIManager — 全局 UI 调度器
- *
- * 设计意图：
- *   只管页面栈、层级、输入模式的切换。
- *   不关心任何页面的内容，不操作任何 ViewModel 的属性。
- *
- * 核心职责：
- *   1. 页面栈: Push / Pop / 支持关闭任意层级
- *   2. 层级管理: 根据 EUILayer 分配 ZOrder
- *   3. 常驻页面: HUD 不压栈，常驻显示
- *   4. 输入模式: 打开全屏→UI Only（并聚焦新页面），全部关闭→Game Only
- *   5. 返回键: ESC / 手柄B 由页面 OnBack → HandleBack 按 Overlay>Popup>Screen 顺序关闭
- *
- * 生命周期：
- *   WorldSubsystem — 随关卡创建和销毁。
- *   关卡切换时自动重置所有页面栈。
+ * 每个 ULocalPlayer 拥有独立实例，UI 创建、输入模式和页面栈都只作用于
+ * 当前客户端。服务器端没有 LocalPlayer，因此不会创建界面。
  */
 UCLASS()
-class MH_API UUIManager : public UTickableWorldSubsystem
+class MH_API UUIManager : public ULocalPlayerSubsystem, public FTickableGameObject
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
+
 public:
-    // ============================================
-    // WorldSubsystem 生命周期
-    // ============================================
+    UUIManager();
 
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
+    virtual void PlayerControllerChanged(APlayerController* NewPlayerController) override;
 
-    /** 每一帧检查，处理待清理的页面 */
+    /** 获取指定本地玩家对应的 UI 管理器。 */
+    UFUNCTION(BlueprintPure, Category = "UI", meta = (WorldContext = "WorldContextObject"))
+    static UUIManager* GetUIManager(const UObject* WorldContextObject, int32 PlayerIndex = 0);
+
+    UFUNCTION(BlueprintPure, Category = "UI")
+    APlayerController* GetOwningPlayerController() const;
+
+    /** 在本机控制器所属的 UIManager 上打开常驻页面；远程控制器返回 nullptr。 */
+    UFUNCTION(BlueprintCallable, Category = "UI|Persistent")
+    static UBaseScreen* OpenPersistentScreenForLocalPlayer(
+        APlayerController* PlayerController,
+        FName ScreenID,
+        TSubclassOf<UBaseScreen> ScreenClass,
+        EUIScreenInputMode InputMode = EUIScreenInputMode::GameOnly);
+
+
+    // ============================================
+    // 常驻页面（HUD / 主菜单等）
+    // ============================================
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Persistent")
+    UBaseScreen* OpenPersistentScreen(
+        FName ScreenID,
+        TSubclassOf<UBaseScreen> ScreenClass,
+        EUIScreenInputMode InputMode = EUIScreenInputMode::GameOnly);
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Persistent")
+    void ClosePersistentScreen(FName ScreenID);
+
+    UFUNCTION(BlueprintPure, Category = "UI|Persistent")
+    UBaseScreen* GetPersistentScreen(FName ScreenID) const;
+
+    // ============================================
+    // 页面栈
+    // ============================================
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Screen")
+    UBaseScreen* PushScreen(TSubclassOf<UBaseScreen> ScreenClass, UObject* Param = nullptr);
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Screen")
+    void PopScreen();
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Screen")
+    void PopToScreen(UBaseScreen* TargetScreen);
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Popup")
+    UBaseScreen* ShowPopup(TSubclassOf<UBaseScreen> PopupClass, UObject* Param = nullptr);
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Popup")
+    void ClosePopup();
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Overlay")
+    UBaseScreen* PushOverlay(TSubclassOf<UBaseScreen> OverlayClass, UObject* Param = nullptr);
+
+    UFUNCTION(BlueprintCallable, Category = "UI|Overlay")
+    void PopOverlay();
+
+    /** 关闭所有页面。bImmediate=false 时保留关闭动画等待时间。 */
+    UFUNCTION(BlueprintCallable, Category = "UI")
+    void CloseAllScreens(bool bImmediate = true);
+
+    /** 重新解析所有页面的数据源。Pawn、PlayerState 或 PlayerController 变化时由管理器调用。 */
+    UFUNCTION(BlueprintCallable, Category = "UI")
+    void RefreshAllScreensDataContext();
+
+    // ============================================
+    // 返回键路由 / 查询
+    // ============================================
+
+    UFUNCTION(BlueprintCallable, Category = "UI")
+    void HandleBack();
+
+    UFUNCTION(BlueprintPure, Category = "UI")
+    UBaseScreen* GetTopScreen(EUILayer Layer) const;
+
+    UFUNCTION(BlueprintPure, Category = "UI")
+    UBaseScreen* GetTopmostScreen() const;
+
+    UFUNCTION(BlueprintPure, Category = "UI")
+    int32 GetScreenStackDepth(EUILayer Layer) const;
+
+    // ============================================
+    // FTickableGameObject
+    // ============================================
+
     virtual void Tick(float DeltaTime) override;
-    /** 游戏暂停时也继续 Tick，保证关闭动画后的页面能被移除 */
+    virtual bool IsTickable() const override;
     virtual bool IsTickableWhenPaused() const override { return true; }
+    virtual bool IsTickableInEditor() const override { return false; }
+    virtual ETickableTickType GetTickableTickType() const override;
+    virtual UWorld* GetTickableGameObjectWorld() const override;
     virtual TStatId GetStatId() const override
     {
         RETURN_QUICK_DECLARE_CYCLE_STAT(UUIManager, STATGROUP_Tickables);
     }
 
-    // ============================================
-    // 常驻页面（HUD）
-    // ============================================
-
-    /**
-     * 打开常驻页面。不会覆盖其他页面，也不进栈。
-     * @param ScreenID    内部标识名
-     * @param ScreenClass 页面类
-     * @return 创建的页面，或已有的页面（如果 ScreenID 重复）
-     */
-    UBaseScreen* OpenPersistentScreen(FName ScreenID, TSubclassOf<UBaseScreen> ScreenClass);
-    void ClosePersistentScreen(FName ScreenID);
-
-    /** 获取常驻页面 */
-    UBaseScreen* GetPersistentScreen(FName ScreenID) const;
-
-    // ============================================
-    // 全屏页面（Screen 层）
-    // ============================================
-
-    /**
-     * 压入全屏页面。之前的页面被覆盖。
-     * @param ScreenClass 页面类
-     * @param Param       传递给 OnOpen 的参数
-     * @return 创建的页面
-     */
-    UBaseScreen* PushScreen(TSubclassOf<UBaseScreen> ScreenClass, UObject* Param = nullptr);
-
-    /**
-     * 返回上一页（等同于 PopScreen(nullptr)）
-     */
-    void PopScreen();
-
-    /**
-     * 关闭到指定页面（含）。nullptr 表示关闭最顶层一个。
-     * 关闭的页面播完动画后从视口移除。
-     */
-    void PopToScreen(UBaseScreen* TargetScreen);
-
-    // ============================================
-    // 弹窗（Popup 层压栈，可叠放多个）
-    // ============================================
-
-    UBaseScreen* ShowPopup(TSubclassOf<UBaseScreen> PopupClass, UObject* Param = nullptr);
-    void ClosePopup();
-
-    // ============================================
-    // 最高层（加载界面、暂停菜单）
-    // ============================================
-
-    UBaseScreen* PushOverlay(TSubclassOf<UBaseScreen> OverlayClass, UObject* Param = nullptr);
-    void PopOverlay();
-
-    // ============================================
-    // 返回键路由
-    // ============================================
-
-    /**
-     * 按返回键（ESC / 手柄B）时的统一入口。
-     * 按 Overlay > Popup > Screen 的优先级关闭最顶层页面。
-     * 页面默认的 OnBack() 会调用这里。
-     */
-    void HandleBack();
-
-    // ============================================
-    // 查询
-    // ============================================
-
-    UBaseScreen* GetTopScreen(EUILayer Layer) const;
-
-    /** 当前最顶层页面（Overlay > Popup > Screen），没有则返回 nullptr */
-    UBaseScreen* GetTopmostScreen() const;
-    int32 GetScreenStackDepth(EUILayer Layer) const;
-
 private:
-    // ============================================
-    // 内部方法
-    // ============================================
+    friend class UBaseScreen;
 
-    /** 压入任意层级（Screen/Popup/Overlay 共用） */
     UBaseScreen* PushToLayer(EUILayer Layer, TSubclassOf<UBaseScreen> ScreenClass, UObject* Param);
-
-    /** 从指定层级弹出（TargetScreen 为空时只弹栈顶） */
     void PopFromLayer(EUILayer Layer, UBaseScreen* TargetScreen = nullptr);
-
-    /** 创建 Widget 并添加到视口指定层级 */
     UBaseScreen* CreateAndAddScreen(TSubclassOf<UBaseScreen> ScreenClass, EUILayer Layer);
+    void NotifyScreenDestroyed(UBaseScreen* Screen);
 
-    /** 获取层级的 ZOrder 基数 */
+    void ApplyStackState();
+    UBaseScreen* GetActiveStackScreen() const;
+    EUIScreenInputMode GetDesiredInputMode() const;
+    UBaseScreen* GetInputFocusScreen() const;
+    void UpdateInputMode();
+    void SetInputMode(EUIScreenInputMode InputMode, UBaseScreen* FocusScreen);
+
+    void CloseScreen(UBaseScreen* Screen, bool bImmediate);
+    void ScheduleRemoval(UBaseScreen* Screen);
+    void ApplyRemoveFromParent(UBaseScreen* Screen);
+
+    void BindToPlayerController(APlayerController* PlayerController);
+    void UnbindFromPlayerController();
+
+    /** 延迟到下一帧刷新，等待 Pawn/PlayerState 的复制顺序稳定。 */
+    void RequestDataContextRefresh();
+
+    UFUNCTION()
+    void HandlePossessedPawnChanged(APawn* OldPawn, APawn* NewPawn);
+
     static int32 GetLayerBaseZOrder(EUILayer Layer);
 
-    /** 切换到 UI 输入模式，并把键盘焦点给到指定页面 */
-    void SetInputModeUI(UBaseScreen* FocusScreen);
-
-    /** 切换到游戏输入模式 */
-    void SetInputModeGame();
-
-    /** 根据当前页面状态同步输入模式（有页面→UI，无页面→Game） */
-    void UpdateInputMode();
-
-    // ============================================
-    // 数据成员
-    // ============================================
-
-    /** 每层独立页面栈 */
+private:
     TMap<EUILayer, TArray<UBaseScreen*>> LayerStacks;
-
-    /** 常驻页面表 */
     TMap<FName, UBaseScreen*> PersistentScreens;
 
-    /** 待移除的页面（播完关闭动画后真正移除） */
+    TWeakObjectPtr<UBaseScreen> ActiveStackScreen;
+    TWeakObjectPtr<APlayerController> BoundPlayerController;
+
+    /** 由管理器持有的界面强引用，避免从视口移除后、延迟销毁前被 GC。 */
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UBaseScreen>> OwnedScreens;
+
+    bool bIsShuttingDown = false;
+    bool bRefreshDataContextNextTick = false;
+
     struct FPendingRemoval
     {
-        UBaseScreen* Screen;
-        float RemainingTime;
+        TWeakObjectPtr<UBaseScreen> Screen;
+        float RemainingTime = 0.f;
     };
     TArray<FPendingRemoval> PendingRemovals;
 };

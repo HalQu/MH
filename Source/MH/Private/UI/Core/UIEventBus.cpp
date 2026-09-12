@@ -1,12 +1,6 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "UI/Core/UIEventBus.h"
 
-
-// ============================================
-// 生命周期
-// ============================================
+#include "Misc/ScopeExit.h"
 
 void UUIEventBus::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -20,7 +14,6 @@ void UUIEventBus::Initialize(FSubsystemCollectionBase& Collection)
 
 void UUIEventBus::Deinitialize()
 {
-    // 防御性清理：确保所有监听都释放
     Listeners.Empty();
     BroadcastingEvents.Empty();
 
@@ -29,21 +22,29 @@ void UUIEventBus::Deinitialize()
     Super::Deinitialize();
 }
 
-// ============================================
-// 广播
-// ============================================
-
 void UUIEventBus::Broadcast(FName EventName, const FUIEventPayload& Payload)
 {
-    // 没有这个事件或没有监听者 — 直接返回，不分配空 TArray
-    TArray<FUIEventHandler>* Found = Listeners.Find(EventName);
+    BroadcastInternal(EventName, Payload, nullptr);
+}
+
+void UUIEventBus::Broadcast(FName EventName)
+{
+    FUIEmptyPayload Empty;
+    // 旧入口视为空载荷事件：无类型监听仍兼容，强类型监听需声明 FUIEmptyPayload。
+    BroadcastInternal(EventName, Empty, FUIEmptyPayload::StaticStruct());
+}
+
+void UUIEventBus::BroadcastInternal(
+    FName EventName,
+    const FUIEventPayload& Payload,
+    const UScriptStruct* PayloadType)
+{
+    TArray<FUIEventListener>* Found = Listeners.Find(EventName);
     if (!Found || Found->Num() == 0)
     {
         return;
     }
 
-    // 递归保护：同一事件在回调里再次广播会被跳过（防止死循环）。
-    // 不同事件的嵌套广播（回调里广播另一个事件）是允许的。
     if (BroadcastingEvents.Contains(EventName))
     {
         UE_LOG(LogTemp, Warning, TEXT("[UIEventBus] Recursive broadcast detected for '%s', skipped"),
@@ -51,32 +52,69 @@ void UUIEventBus::Broadcast(FName EventName, const FUIEventPayload& Payload)
         return;
     }
 
-    BroadcastingEvents.Add(EventName);
-
-    // 复制一份回调列表再遍历 — 防回调里 Unlisten 导致迭代器失效
-    TArray<FUIEventHandler> HandlersCopy = *Found;
-    for (FUIEventHandler& Handler : HandlersCopy)
+    TArray<FDelegateHandle> Handles;
+    Handles.Reserve(Found->Num());
+    for (const FUIEventListener& Listener : *Found)
     {
-        if (Handler.IsBound())
+        if (Listener.Handler.IsBound())
         {
-            Handler.Execute(Payload);
+            Handles.Add(Listener.Handler.GetHandle());
         }
     }
 
-    BroadcastingEvents.Remove(EventName);
-}
+    BroadcastingEvents.Add(EventName);
+    ON_SCOPE_EXIT
+    {
+        BroadcastingEvents.Remove(EventName);
+    };
 
-void UUIEventBus::Broadcast(FName EventName)
-{
-    FUIEmptyPayload Empty;
-    Broadcast(EventName, Empty);
-}
+    // 每次执行前重新查找当前监听者。广播中 Unlisten 的对象不会在本次广播中继续执行。
+    for (const FDelegateHandle& Handle : Handles)
+    {
+        TArray<FUIEventListener>* CurrentListeners = Listeners.Find(EventName);
+        if (!CurrentListeners)
+        {
+            return;
+        }
 
-// ============================================
-// 监听
-// ============================================
+        FUIEventListener* Listener = CurrentListeners->FindByPredicate(
+            [&Handle](const FUIEventListener& Candidate)
+            {
+                return Candidate.Handler.GetHandle() == Handle;
+            });
+
+        if (!Listener || !Listener->Handler.IsBound())
+        {
+            continue;
+        }
+
+        if (PayloadType)
+        {
+            if (Listener->PayloadType && Listener->PayloadType != PayloadType)
+            {
+                continue;
+            }
+        }
+        else if (Listener->PayloadType != nullptr)
+        {
+            // 无类型 Broadcast 不会误触发认为自己是强类型监听的处理器。
+            continue;
+        }
+
+        // PayloadType 为空的旧 Listen 通配任意事件载荷；强类型监听只接收同类型载荷。
+        Listener->Handler.Execute(Payload);
+    }
+}
 
 FDelegateHandle UUIEventBus::Listen(FName EventName, FUIEventHandler InHandler)
+{
+    return ListenInternal(EventName, InHandler, nullptr);
+}
+
+FDelegateHandle UUIEventBus::ListenInternal(
+    FName EventName,
+    FUIEventHandler InHandler,
+    const UScriptStruct* PayloadType)
 {
     if (!InHandler.IsBound())
     {
@@ -85,13 +123,12 @@ FDelegateHandle UUIEventBus::Listen(FName EventName, FUIEventHandler InHandler)
         return FDelegateHandle();
     }
 
-    TArray<FUIEventHandler>& List = Listeners.FindOrAdd(EventName);
-
-    // 防止同一委托实例重复注册（不同实例允许，按 Handle 精确退订）
+    TArray<FUIEventListener>& List = Listeners.FindOrAdd(EventName);
     const FDelegateHandle NewHandle = InHandler.GetHandle();
-    for (const FUIEventHandler& Existing : List)
+
+    for (const FUIEventListener& Existing : List)
     {
-        if (Existing.GetHandle() == NewHandle)
+        if (Existing.Handler.GetHandle() == NewHandle)
         {
             UE_LOG(LogTemp, Warning, TEXT("[UIEventBus] Duplicate listener for '%s', ignored"),
                 *EventName.ToString());
@@ -99,17 +136,13 @@ FDelegateHandle UUIEventBus::Listen(FName EventName, FUIEventHandler InHandler)
         }
     }
 
-    List.Add(InHandler);
+    List.Add({ MoveTemp(InHandler), PayloadType });
 
-    UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Listening '%s' → %d listener(s)"),
+    UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Listening '%s' -> %d listener(s)"),
         *EventName.ToString(), List.Num());
 
     return NewHandle;
 }
-
-// ============================================
-// 取消监听
-// ============================================
 
 void UUIEventBus::Unlisten(FName EventName, FDelegateHandle InHandle)
 {
@@ -118,19 +151,18 @@ void UUIEventBus::Unlisten(FName EventName, FDelegateHandle InHandle)
         return;
     }
 
-    TArray<FUIEventHandler>* Found = Listeners.Find(EventName);
+    TArray<FUIEventListener>* Found = Listeners.Find(EventName);
     if (!Found)
     {
         return;
     }
 
-    // 按精确 Handle 移除，避免同名对象注册多个回调时误删
-    for (int32 i = Found->Num() - 1; i >= 0; --i)
+    for (int32 Index = Found->Num() - 1; Index >= 0; --Index)
     {
-        if ((*Found)[i].GetHandle() == InHandle)
+        if ((*Found)[Index].Handler.GetHandle() == InHandle)
         {
-            Found->RemoveAt(i);
-            UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Unlistened '%s' → %d listener(s)"),
+            Found->RemoveAt(Index);
+            UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Unlistened '%s' -> %d listener(s)"),
                 *EventName.ToString(), Found->Num());
             return;
         }
@@ -146,53 +178,44 @@ void UUIEventBus::UnlistenAll(const UObject* InObject)
 
     for (auto& Pair : Listeners)
     {
-        TArray<FUIEventHandler>& List = Pair.Value;
+        TArray<FUIEventListener>& List = Pair.Value;
 
-        for (int32 i = List.Num() - 1; i >= 0; --i)
+        for (int32 Index = List.Num() - 1; Index >= 0; --Index)
         {
-            if (!List[i].IsBound())
+            if (!List[Index].Handler.IsBound() || List[Index].Handler.GetUObject() == InObject)
             {
-                List.RemoveAt(i);
-                continue;
-            }
-
-            // 比对绑定对象的原始指针（不需要确切匹配 Handle）
-            if (List[i].GetUObject() == InObject)
-            {
-                List.RemoveAt(i);
+                List.RemoveAt(Index);
             }
         }
     }
 
-    // 清理空的条目（TMap 没有 RemoveAll，用迭代器删除）
-    for (auto It = Listeners.CreateIterator(); It; ++It)
+    for (auto Iterator = Listeners.CreateIterator(); Iterator; ++Iterator)
     {
-        if (It.Value().Num() == 0)
+        if (Iterator.Value().Num() == 0)
         {
-            It.RemoveCurrent();
+            Iterator.RemoveCurrent();
         }
     }
 
-    UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Unlistened all for object"));
+    UE_LOG(LogTemp, Verbose, TEXT("[UIEventBus] Unlistened all for object '%s'"),
+        *InObject->GetName());
 }
-
-// ============================================
-// 调试
-// ============================================
 
 int32 UUIEventBus::GetListenerCount(FName EventName) const
 {
-    const TArray<FUIEventHandler>* Found = Listeners.Find(EventName);
+    const TArray<FUIEventListener>* Found = Listeners.Find(EventName);
     if (!Found)
     {
         return 0;
     }
 
-    // 只算 still bound 的
     int32 Count = 0;
-    for (const FUIEventHandler& H : *Found)
+    for (const FUIEventListener& Listener : *Found)
     {
-        if (H.IsBound()) ++Count;
+        if (Listener.Handler.IsBound())
+        {
+            ++Count;
+        }
     }
     return Count;
 }

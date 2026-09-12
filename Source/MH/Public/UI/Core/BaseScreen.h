@@ -1,103 +1,62 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "UI/Core/UIScreenTypes.h"
 #include "BaseScreen.generated.h"
+
 class UBaseViewModel;
+class UUIManager;
+
 /**
- * BaseScreen — 所有 UI 页面的基类
+ * BaseScreen - 所有 UI 页面的基类
  *
- * 设计意图：
- *   纯 View 层。不包含任何游戏逻辑，不计算任何值。
- *   只做三件事：
- *     1. 持有 ViewModel，管理它的生命周期
- *     2. 把 ViewModel 的 Output 属性绑定到 UI 控件上
- *     3. 把用户操作（点击、拖拽）转发给 ViewModel 的 Input 方法
- *
- * 生命周期（由 UIManager 驱动）：
- *   OnOpen   → 创建 ViewModel → 激活 → 绑定 UI → 播打开动画
- *   OnCovered → 暂停 ViewModel，自身半透明
- *   OnRevealed → 恢复 ViewModel，自身可见，刷新数据
- *   OnClose  → 销毁 ViewModel → 播关闭动画
- *             （页面移除由 UIManager 的 PendingRemovals 统一负责）
- *
- * 使用模式（子类）：
- *   1. 在蓝图里设置 ViewModelClass
- *   2. 重写 OnOpen，从中取 ViewModel 绑定 UI
- *   3. 按钮 OnClick → ViewModel->RequestXxx()
+ * Screen 只负责 View 和 ViewModel 的生命周期绑定。页面栈、覆盖状态、输入模式
+ * 和本地玩家归属由 UUIManager 统一管理。
  */
 UCLASS()
 class MH_API UBaseScreen : public UUserWidget
 {
-	GENERATED_BODY()
-    friend class UUIManager;
+    GENERATED_BODY()
 
 public:
-    // ============================================
-    // 生命周期（由 UIManager 调用）
-    // ============================================
-
-    /**
-     * 页面打开时调用。
-     * 负责创建 ViewModel、绑定 UI、播放打开动画。
-     * @param Param 打开参数（如要显示的物品ID），可为空
-     */
     virtual void OnOpen(UObject* Param = nullptr);
-
-    /**
-     * 被上层页面覆盖时调用。
-     * 暂停 ViewModel，自身不可交互。
-     */
     virtual void OnCovered();
-
-    /**
-     * 上层关闭后重新可见。
-     * 恢复 ViewModel，刷新数据。
-     */
     virtual void OnRevealed();
-
-    /**
-     * 页面关闭时调用。
-     * 销毁 ViewModel，播放关闭动画。
-     * 动画结束后由 UIManager 统一从视口移除。
-     */
     virtual void OnClose();
 
-    /**
-     * 按返回键（ESC / 手柄 B）。
-     * 默认路由到 UIManager::HandleBack，
-     * 按 Overlay > Popup > Screen 优先级关闭最顶层页面。
-     */
-    virtual void OnBack();
+    /** 返回键默认路由。蓝图页面可以覆写此事件实现页面内返回逻辑。 */
+    UFUNCTION(BlueprintNativeEvent, Category = "Screen")
+    void OnBack();
+    virtual void OnBack_Implementation();
 
-    // ============================================
-    // 子类可覆盖的钩子
-    // ============================================
-
-    /** 获取数据源 — 默认从 PlayerController 拿 PlayerState */
     virtual UObject* GetDataSource() const;
 
-    // 打开/关闭动画（BlueprintImplementableEvent 让蓝图做动画）
+    /** 重新解析数据源并刷新 ViewModel。Pawn/Controller 变化时由 UIManager 调用。 */
+    UFUNCTION(BlueprintCallable, Category = "Screen")
+    void RefreshDataContext();
+
+    UFUNCTION(BlueprintCallable, Category = "Screen")
+    void SetInputModePolicy(EUIScreenInputMode NewInputMode);
+
+    UFUNCTION(BlueprintPure, Category = "Screen")
+    EUIScreenInputMode GetInputModePolicy() const { return InputModePolicy; }
+
+    UFUNCTION(BlueprintPure, Category = "Screen")
+    float GetCloseAnimDuration() const { return FMath::Max(0.f, CloseAnimDuration); }
+
+    UFUNCTION(BlueprintPure, Category = "Screen")
+    UUIManager* GetUIManager() const;
+
     UFUNCTION(BlueprintNativeEvent, Category = "Screen")
     void PlayOpenAnimation();
+    virtual void PlayOpenAnimation_Implementation();
+
     UFUNCTION(BlueprintNativeEvent, Category = "Screen")
     void PlayCloseAnimation();
+    virtual void PlayCloseAnimation_Implementation();
 
-    // ============================================
-    // 按键处理
-    // ============================================
-
-    /**
-     * ESC / 手柄B → OnBack()。
-     * UIManager 打开页面时会把键盘焦点给到最顶层页面，按键会先到这里。
-     */
     virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
-
-    // ============================================
-    // 公开访问
-    // ============================================
 
     UFUNCTION(BlueprintCallable, Category = "Screen")
     UBaseViewModel* GetViewModel() const { return ViewModel; }
@@ -109,44 +68,51 @@ public:
     bool IsTopmost() const { return bIsTopmost; }
 
 protected:
-    // ── 编辑器配置 ──
+    virtual void NativeDestruct() override;
 
-    /** 当前页面对应的 ViewModel 类，在蓝图里设置 */
+    /** 蓝图生命周期事件，主要用于纯蓝图页面接入统一 UI 系统。 */
+    UFUNCTION(BlueprintImplementableEvent, Category = "Screen", meta = (DisplayName = "On Screen Opened"))
+    void BP_OnOpened(UObject* Param);
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Screen", meta = (DisplayName = "On Screen Covered"))
+    void BP_OnCovered();
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Screen", meta = (DisplayName = "On Screen Revealed"))
+    void BP_OnRevealed();
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Screen", meta = (DisplayName = "On Screen Closed"))
+    void BP_OnClosed();
+
+    UFUNCTION(BlueprintImplementableEvent, Category = "Screen", meta = (DisplayName = "On Data Context Changed"))
+    void BP_OnDataContextChanged();
+
+protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Screen")
     TSubclassOf<UBaseViewModel> ViewModelClass;
 
-    /** 关闭动画时长，UIManager 用它延迟移除页面 */
-    UPROPERTY(EditDefaultsOnly, Category = "Screen")
-    float CloseAnimDuration = 0.3f;
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Screen")
+    EUIScreenInputMode InputModePolicy = EUIScreenInputMode::GameOnly;
 
-    // ── 运行时状态 ──
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Screen")
+    float CloseAnimDuration = 0.3f;
 
     UPROPERTY(BlueprintReadOnly, Category = "Screen")
     UBaseViewModel* ViewModel = nullptr;
 
-    /** UIManager 的弱引用，由 UIManager 在 PushScreen 时设置 */
-    UUIManager* OwnerUIManager = nullptr;
-
     bool bIsOpen = false;
-    bool bIsTopmost = true;
+    bool bIsTopmost = false;
 };
 
-
-// ================================================
-// 辅助宏 — 创建绑定了 ViewModel 的快捷绑定
-// ================================================
-
 /**
- * 用法（在 Screen::OnOpen 里）：
- *   BIND_VM_PROPERTY(HealthPercent, &UHUDWidget::SetHealthPercent);
- *
- * 展开为：
- *   ViewModel->HealthPercent.OnChanged.AddUObject(this, &UHUDWidget::SetHealthPercent);
+ * ViewModel 属性绑定。绑定前先移除该 Screen 的旧绑定，避免 OnOpen 重入时重复执行。
  */
 #define BIND_VM_PROPERTY(VM, PropertyName, SetterFunc) \
-    if (VM!=nullptr) \
+    do \
     { \
-        VM->PropertyName.OnChanged.AddUObject(this, SetterFunc); \
-        /* 绑定即同步：立即广播当前值，防止首次广播早于订阅 */ \
-        VM->PropertyName.Broadcast(); \
-    }
+        if (VM != nullptr) \
+        { \
+            VM->PropertyName.OnChanged.RemoveAll(this); \
+            VM->PropertyName.OnChanged.AddUObject(this, SetterFunc); \
+            VM->PropertyName.Broadcast(); \
+        } \
+    } while (false)

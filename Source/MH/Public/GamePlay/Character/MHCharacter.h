@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "GamePlay/Combat/IMHCombatTargetInterface.h"
 #include "MHCharacter.generated.h"
 
 struct FInputActionValue;
@@ -11,9 +12,10 @@ enum class ETriggerEvent : uint8;
 class UInputMappingContext;
 class UInputAction;
 class UCombatComponent;
+class UHealthComponent;
 
 UCLASS()
-class MH_API AMHCharacter : public ACharacter
+class MH_API AMHCharacter : public ACharacter, public IMHCombatTargetInterface
 {
 	GENERATED_BODY()
 
@@ -27,6 +29,12 @@ public:
 
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
+	/** IMHCombatTargetInterface：收到伤害请求，实际扣血由 UHealthComponent 处理。 */
+	virtual void ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent) override;
+
+	UFUNCTION(BlueprintPure, Category = "Combat|Health")
+	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
 protected:
 
 	//Camera
@@ -39,6 +47,10 @@ protected:
 	//Combat
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<class UCombatComponent> CombatComponent;
+
+	//Combat|Health
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Health")
+	TObjectPtr<class UHealthComponent> HealthComponent;
 
 	//input
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -65,6 +77,8 @@ protected:
 
 
 	virtual void BeginPlay() override;
+	UFUNCTION()
+	void HandleDeath();
 	//Test
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test")
 	UAnimMontage* AttackMontage;
