@@ -62,8 +62,9 @@ void UCombatComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(UCombatComponent, CurrentWeaponPath);
 	DOREPLIFETIME(UCombatComponent, CombatState);
 	DOREPLIFETIME(UCombatComponent, MovePhase);
-	DOREPLIFETIME(UCombatComponent, CurrentMoveId);
-	DOREPLIFETIME(UCombatComponent, CurrentMoveIndex);
+	// 动作状态必须排在 CurrentWeaponPath / CombatState 之后：OnRep_ActionState
+	// 解析动作时，武器与状态已经在同一批数据里就绪。
+	DOREPLIFETIME(UCombatComponent, ActionState);
 	DOREPLIFETIME(UCombatComponent, bComboWindowOpen);
 }
 
@@ -129,7 +130,7 @@ void UCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	UpdateMovementLock(false);
 	AttackInputPressTimes.Reset();
 	ClearBufferedComboInput();
-	CancelPredictedMove(false);
+	CancelPredictedMove(false, false);
 	CurrentChargeInputAction = nullptr;
 	bIsCharging = false;
 	bChargeInputHeld = false;
@@ -148,6 +149,25 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 	if ((CombatState == EMHCombatState::Attack || bHasPendingPredictedMove) && CachedAnimInstance && CurrentMoveData.Montage)
 	{
 		CurrentMoveTime = CachedAnimInstance->Montage_GetPosition(CurrentMoveData.Montage);
+	}
+
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !ActionState.bActive)
+	{
+		return;
+	}
+
+	// 蓄力开关与播放进度是同一个动作内部的增量数据，直接写进复制状态。
+	// 客户端收到后只做表现修正，不会重播蒙太奇（Sequence 没有变化）。
+	if (ActionState.bCharging != bIsCharging)
+	{
+		ActionState.bCharging = bIsCharging;
+	}
+
+	ActionPositionSyncAccumulator += DeltaTime;
+	if (ActionPositionSyncInterval <= 0.f || ActionPositionSyncAccumulator >= ActionPositionSyncInterval)
+	{
+		ActionPositionSyncAccumulator = 0.f;
+		ActionState.MontagePosition = CurrentMoveTime;
 	}
 }
 
@@ -221,6 +241,8 @@ bool UCombatComponent::HandleComboInput(UInputAction* InputAction, ETriggerEvent
 			{
 				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate);
 			}
+			// 本机已经预测松手，服务器确认之前不要被旧的 bCharging 拉回去。
+			bChargeReleasePredicted = true;
 			bIsCharging = false;
 			bChargeInputHeld = false;
 		}
@@ -323,27 +345,64 @@ bool UCombatComponent::TryPredictMove(const FMHCombatInputSnapshot& Input, bool 
 		return false;
 	}
 
-	// First pass only predicts new attacks. Chained moves still wait for the authoritative combo window.
-	if (CombatState != EMHCombatState::Locomotion && CombatState != EMHCombatState::WeaponSwitch)
+	CacheOwnerReferences();
+
+	int32 MoveIndex = INDEX_NONE;
+	if (CombatState == EMHCombatState::Locomotion || CombatState == EMHCombatState::WeaponSwitch)
+	{
+		const TMap<FComboCondition, int32>& StartMoves = IsAirborne() ? CurrentWeapon->AirStartMoves : CurrentWeapon->GroundStartMoves;
+		MoveIndex = FindBestComboIndex(StartMoves, Input);
+	}
+	else if (CombatState == EMHCombatState::Attack)
+	{
+		if (!CurrentMoveData.bCanChain || !IsComboInputAllowed())
+		{
+			return false;
+		}
+
+		MoveIndex = FindBestComboIndex(CurrentMoveData.ComboChain, Input);
+	}
+	else
 	{
 		return false;
 	}
 
-	const TMap<FComboCondition, int32>& StartMoves = IsAirborne() ? CurrentWeapon->AirStartMoves : CurrentWeapon->GroundStartMoves;
-	const int32 MoveIndex = FindBestComboIndex(StartMoves, Input);
 	const FMHCombatMoveData* Move = GetMove(MoveIndex);
 	if (!Move || !Move->Montage)
 	{
 		return false;
 	}
 
-	PendingPredictedMove.InputSequence = Input.ClientInputSequence;
-	PendingPredictedMove.WeaponPath = CurrentWeaponPath.IsNull() ? FSoftObjectPath(CurrentWeapon) : CurrentWeaponPath;
-	PendingPredictedMove.MoveIndex = MoveIndex;
-	PendingPredictedMove.SectionName = Move->SectionName;
-	PendingPredictedMove.PlayRate = Move->MontagePlayRate;
-	PendingPredictedMove.StartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-	PendingPredictedMove.Montage = Move->Montage;
+	FMHCombatPredictedMove Prediction;
+	Prediction.InputSequence = Input.ClientInputSequence;
+	Prediction.WeaponPath = CurrentWeaponPath.IsNull() ? FSoftObjectPath(CurrentWeapon) : CurrentWeaponPath;
+	Prediction.MoveIndex = MoveIndex;
+	Prediction.SectionName = Move->SectionName;
+	Prediction.PlayRate = Move->MontagePlayRate;
+	Prediction.StartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	Prediction.Montage = Move->Montage;
+
+	if (CombatState == EMHCombatState::Attack && CurrentMoveData.Montage)
+	{
+		Prediction.bHadPreviousMove = true;
+		Prediction.PreviousMoveData = CurrentMoveData;
+		Prediction.PreviousMoveIndex = CurrentMoveIndex;
+		Prediction.PreviousMoveId = CurrentMoveId;
+		Prediction.PreviousMontage = CurrentMoveData.Montage;
+		Prediction.PreviousMontagePosition = CachedAnimInstance
+			? CachedAnimInstance->Montage_GetPosition(Prediction.PreviousMontage)
+			: 0.f;
+		Prediction.PreviousEffectivePlayRate = Prediction.PreviousMoveData.MontagePlayRate;
+		if (bIsCharging)
+		{
+			Prediction.PreviousEffectivePlayRate *= ChargePlayRateScale;
+		}
+		Prediction.bPreviousChargeMove = bIsChargeMove;
+		Prediction.bPreviousCharging = bIsCharging;
+		Prediction.bPreviousChargeInputHeld = bChargeInputHeld;
+	}
+
+	PendingPredictedMove = Prediction;
 	bHasPendingPredictedMove = true;
 
 	PlayMovePresentation(CurrentWeapon, MoveIndex, Move->SectionName, Move->MontagePlayRate);
@@ -354,49 +413,40 @@ bool UCombatComponent::TryPredictMove(const FMHCombatInputSnapshot& Input, bool 
 	}
 
 	UE_LOG(LogMHCombatNet, Log,
-		TEXT("[CombatNet] Predicting Move Owner=%s Sequence=%d Weapon=%s MoveIndex=%d Montage=%s"),
+		TEXT("[CombatNet] Predicting Move Owner=%s Sequence=%d Weapon=%s MoveIndex=%d Montage=%s Chained=%d"),
 		*CachedCharacter->GetName(),
 		Input.ClientInputSequence,
 		*PendingPredictedMove.WeaponPath.ToString(),
 		MoveIndex,
-		*Move->Montage->GetName());
+		*Move->Montage->GetName(),
+		Prediction.bHadPreviousMove ? 1 : 0);
 	return true;
 }
 
-void UCombatComponent::ConfirmPredictedMove(int32 ClientInputSequence, const FSoftObjectPath& WeaponPath, int32 MoveIndex)
+void UCombatComponent::ConfirmPredictedMove()
 {
-	if (!bHasPendingPredictedMove || PendingPredictedMove.InputSequence != ClientInputSequence)
+	if (!bHasPendingPredictedMove)
 	{
-		return;
-	}
-
-	if (PendingPredictedMove.WeaponPath != WeaponPath || PendingPredictedMove.MoveIndex != MoveIndex)
-	{
-		CancelPredictedMove(false);
 		return;
 	}
 
 	const int32 ConfirmedSequence = PendingPredictedMove.InputSequence;
 	bHasPendingPredictedMove = false;
-	if (const FMHCombatMoveData* ConfirmedMove = GetMove(MoveIndex))
-	{
-		CurrentMoveIndex = MoveIndex;
-		CurrentMoveId = ConfirmedMove->MoveId;
-		CurrentMoveTime = 0.f;
-		if (CombatState != EMHCombatState::Attack)
-		{
-			SetCombatState(
-				EMHCombatState::Attack,
-				ConfirmedMove->bIsChargeMove ? EMHCombatMovePhase::Charge : EMHCombatMovePhase::Startup);
-		}
-	}
 	PendingPredictedMove = FMHCombatPredictedMove();
 
+	// 本地预测已经在放同一个蒙太奇，这里只把派生缓存对齐到权威值，
+	// 不重播；后续由 SyncActionPresentation 修正蓄力速率与进度。
+	CurrentMoveIndex = ActionState.MoveIndex;
+	if (const FMHCombatMoveData* ConfirmedMove = GetMove(ActionState.MoveIndex))
+	{
+		CurrentMoveId = ConfirmedMove->MoveId;
+	}
+
 	UE_LOG(LogMHCombatNet, Log, TEXT("[CombatNet] Prediction confirmed Owner=%s Sequence=%d MoveIndex=%d"),
-		CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), ConfirmedSequence, MoveIndex);
+		CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), ConfirmedSequence, ActionState.MoveIndex);
 }
 
-void UCombatComponent::CancelPredictedMove(bool bTimedOut)
+void UCombatComponent::CancelPredictedMove(bool bTimedOut, bool bRestorePrevious)
 {
 	if (!bHasPendingPredictedMove)
 	{
@@ -412,7 +462,36 @@ void UCombatComponent::CancelPredictedMove(bool bTimedOut)
 		CachedCharacter->StopAnimMontage(Prediction.Montage);
 	}
 
-	if (CurrentMoveData.Montage == Prediction.Montage)
+	const bool bPredictionWasCurrent = CurrentMoveData.Montage == Prediction.Montage;
+	if (bPredictionWasCurrent && bRestorePrevious && Prediction.bHadPreviousMove && Prediction.PreviousMontage && CachedCharacter)
+	{
+		CurrentMoveData = Prediction.PreviousMoveData;
+		CurrentMoveIndex = Prediction.PreviousMoveIndex;
+		CurrentMoveId = Prediction.PreviousMoveId;
+		bIsChargeMove = Prediction.bPreviousChargeMove;
+		bIsCharging = Prediction.bPreviousCharging;
+		bChargeInputHeld = Prediction.bPreviousChargeInputHeld;
+		CurrentChargeInputAction = nullptr;
+
+		const float ElapsedTime = GetWorld()
+			? FMath::Max(0.f, GetWorld()->GetTimeSeconds() - Prediction.StartTime)
+			: 0.f;
+		float RestorePosition = Prediction.PreviousMontagePosition + ElapsedTime * Prediction.PreviousEffectivePlayRate;
+		const float PlayLength = Prediction.PreviousMontage->GetPlayLength();
+		if (PlayLength > 0.f)
+		{
+			RestorePosition = FMath::Min(RestorePosition, PlayLength);
+		}
+
+		CachedCharacter->PlayAnimMontage(Prediction.PreviousMontage, Prediction.PreviousMoveData.MontagePlayRate, Prediction.PreviousMoveData.SectionName);
+		if (CachedAnimInstance)
+		{
+			CachedAnimInstance->Montage_SetPosition(Prediction.PreviousMontage, RestorePosition);
+			CachedAnimInstance->Montage_SetPlayRate(Prediction.PreviousMontage, Prediction.PreviousEffectivePlayRate);
+		}
+		CurrentMoveTime = RestorePosition;
+	}
+	else if (bPredictionWasCurrent)
 	{
 		CurrentMoveData = FMHCombatMoveData();
 		CurrentMoveTime = 0.f;
@@ -422,17 +501,18 @@ void UCombatComponent::CancelPredictedMove(bool bTimedOut)
 		CurrentChargeInputAction = nullptr;
 	}
 
+	const int32 RestoredPrevious = bRestorePrevious && Prediction.bHadPreviousMove && bPredictionWasCurrent ? 1 : 0;
 	if (bTimedOut)
 	{
 		UE_LOG(LogMHCombatNet, Warning,
-			TEXT("[CombatNet] Prediction cancelled Owner=%s Sequence=%d TimedOut=1"),
-			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), Prediction.InputSequence);
+			TEXT("[CombatNet] Prediction cancelled Owner=%s Sequence=%d TimedOut=1 RestoredPrevious=%d"),
+			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), Prediction.InputSequence, RestoredPrevious);
 	}
 	else
 	{
 		UE_LOG(LogMHCombatNet, Log,
-			TEXT("[CombatNet] Prediction cancelled Owner=%s Sequence=%d TimedOut=0"),
-			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), Prediction.InputSequence);
+			TEXT("[CombatNet] Prediction cancelled Owner=%s Sequence=%d TimedOut=0 RestoredPrevious=%d"),
+			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"), Prediction.InputSequence, RestoredPrevious);
 	}
 }
 
@@ -757,7 +837,7 @@ void UCombatComponent::HandleCombatNotifyState(EMHCombatNotifyStateType StateTyp
 			if (CachedAnimInstance && CachedAnimInstance->Montage_IsPlaying(CurrentMoveData.Montage)&&bChargeInputHeld)
 			{
 				bIsCharging = true;
-				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate * 0.3f);
+				CachedAnimInstance->Montage_SetPlayRate(CurrentMoveData.Montage, CurrentMoveData.MontagePlayRate * ChargePlayRateScale);
 			}
 		}
 		else if (StateEvent == EMHCombatNotifyStateEvent::End)
@@ -884,7 +964,16 @@ void UCombatComponent::OnRep_CurrentWeaponPath()
 
 	UpdateWeaponMesh(NewWeapon);
 
-	OnRep_CurrentMoveIndex();
+	// 武器换掉之后，还在播放的权威动作要按新武器的动作表刷新一次缓存。
+	if (ActionState.bActive)
+	{
+		if (const FMHCombatMoveData* Move = GetMove(ActionState.MoveIndex))
+		{
+			CurrentMoveData = *Move;
+			CurrentMoveIndex = ActionState.MoveIndex;
+			CurrentMoveId = Move->MoveId;
+		}
+	}
 }
 
 void UCombatComponent::OnRep_CombatState() const
@@ -892,21 +981,49 @@ void UCombatComponent::OnRep_CombatState() const
 	OnCombatStateChanged.Broadcast(CombatState, MovePhase);
 }
 
-void UCombatComponent::OnRep_CurrentMoveIndex()
+/*
+ * 动作状态是“状态”而不是“事件”：客户端不依赖单次 RPC 是否到达，
+ * 只要复制状态变了就会被调用。因此丢包重传、迟到加入、相关性恢复都能自动补齐。
+ */
+void UCombatComponent::OnRep_ActionState()
 {
-	if (CurrentMoveIndex == INDEX_NONE || !CurrentWeapon)
+	CacheOwnerReferences();
+
+	// 服务器确认蓄力结束，本机“松手”的预测可以收回了。
+	if (!ActionState.bCharging)
 	{
-		if (!GetOwner() || !GetOwner()->HasAuthority())
-		{
-			CurrentMoveData = FMHCombatMoveData();
-		}
+		bChargeReleasePredicted = false;
+	}
+
+	if (AppliedActionSequence == ActionState.Sequence)
+	{
+		// 同一个动作内部的增量刷新（蓄力状态、播放进度），绝不能重播蒙太奇。
+		SyncActionPresentation();
 		return;
 	}
 
-	if (const FMHCombatMoveData* Move = GetMove(CurrentMoveIndex))
+	const bool bPredictionConfirmed = ActionState.bActive
+		&& bHasPendingPredictedMove
+		&& PendingPredictedMove.InputSequence == ActionState.InputSequence
+		&& PendingPredictedMove.MoveIndex == ActionState.MoveIndex;
+
+	AppliedActionSequence = ActionState.Sequence;
+
+	if (bPredictionConfirmed)
 	{
-		CurrentMoveData = *Move;
+		// 服务端认可了这次预测：本地蒙太奇已经在放，不要重新播。
+		ConfirmPredictedMove();
+		SyncActionPresentation();
+		return;
 	}
+
+	if (bHasPendingPredictedMove)
+	{
+		// 服务器选了另一个动作（或直接结束了）：回滚预测，再应用权威状态。
+		CancelPredictedMove(false, false);
+	}
+
+	ApplyActionState();
 }
 
 void UCombatComponent::UpdateWeaponMesh(UWeaponDataAsset* NewWeapon)
@@ -945,7 +1062,7 @@ void UCombatComponent::UpdateWeaponMesh(UWeaponDataAsset* NewWeapon)
 	CurrentWeaponMesh->SetVisibility(true);
 }
 
-void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate)
+void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate, float StartPosition)
 {
 	CacheOwnerReferences();
 	if (!CachedCharacter || !MoveWeapon || !MoveWeapon->Moves.IsValidIndex(MoveIndex))
@@ -966,13 +1083,21 @@ void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 
 		return;
 	}
 
+	// 换动作时先收掉上一条蒙太奇；同一条蒙太奇的重播交给 PlayAnimMontage。
+	if (CurrentMoveData.Montage && CurrentMoveData.Montage != Move.Montage)
+	{
+		CachedCharacter->StopAnimMontage(CurrentMoveData.Montage);
+	}
+
+	CurrentMoveData = Move;
+	CurrentMoveIndex = MoveIndex;
+	CurrentMoveId = Move.MoveId;
+	CurrentMoveTime = 0.f;
+
+	// 服务器上的按键/蓄力上下文由 StartMove 写入，这里不能覆盖；
+	// 纯表现端没有输入上下文，按动作自身的数据补齐。
 	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
-		if (CurrentMoveData.Montage && CurrentMoveData.Montage != Move.Montage)
-		{
-			CachedCharacter->StopAnimMontage(CurrentMoveData.Montage);
-		}
-		CurrentMoveData = Move;
 		bIsChargeMove = Move.bIsChargeMove;
 		CurrentChargeInputAction = nullptr;
 		bChargeInputHeld = Move.bIsChargeMove;
@@ -996,104 +1121,150 @@ void UCombatComponent::PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 
 	if (PlayLength <= 0.f)
 	{
 		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] PlayAnimMontage failed. Owner=%s Montage=%s"), *CachedCharacter->GetName(), *Move.Montage->GetName());
-	}
-	OnAttackStarted.Broadcast(Move.MoveId);
-}
-
-void UCombatComponent::StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex)
-{
-	UAnimMontage* MontageToStop = nullptr;
-	if (MoveWeapon && MoveWeapon->Moves.IsValidIndex(MoveIndex))
-	{
-		MontageToStop = MoveWeapon->Moves[MoveIndex].Montage;
-	}
-
-	if (!MontageToStop)
-	{
-		MontageToStop = CurrentMoveData.Montage;
-	}
-
-	if (CachedCharacter && MontageToStop)
-	{
-		CachedCharacter->StopAnimMontage(MontageToStop);
-	}
-
-	if (!GetOwner() || !GetOwner()->HasAuthority())
-	{
-		CurrentMoveData = FMHCombatMoveData();
-		bIsChargeMove = false;
-		CurrentChargeInputAction = nullptr;
-		bIsCharging = false;
-		bChargeInputHeld = false;
-	}
-}
-
-void UCombatComponent::Multicast_PlayMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate, int32 ClientInputSequence)
-{
-	CacheOwnerReferences();
-	UE_LOG(LogMHCombatNet, Log,
-		TEXT("[CombatNet] Multicast_PlayMove received Owner=%s NetMode=%d LocalRole=%d Authority=%d LocallyControlled=%d Replicated=%d WeaponPath=%s MoveIndex=%d Section=%s PlayRate=%.3f InputSequence=%d"),
-		GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
-		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
-		GetOwner() ? static_cast<int32>(GetOwner()->GetLocalRole()) : -1,
-		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
-		CachedCharacter && CachedCharacter->IsLocallyControlled() ? 1 : 0,
-		GetIsReplicated() ? 1 : 0,
-		*WeaponPath.ToString(),
-		MoveIndex,
-		*SectionName.ToString(),
-		PlayRate,
-		ClientInputSequence);
-
-	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
-	if (!MoveWeapon)
-	{
-		UE_LOG(LogMHCombatNet, Warning, TEXT("[CombatNet] Multicast_PlayMove could not resolve weapon path: %s"), *WeaponPath.ToString());
 		return;
 	}
 
-	if (!GetOwner() || !GetOwner()->HasAuthority())
+	// 迟到加入或相关性恢复时，服务器会把当前进度一并复制过来，这里直接对齐。
+	if (StartPosition > 0.f && CachedAnimInstance)
 	{
-		if (CurrentWeaponPath.IsNull() || CurrentWeaponPath == WeaponPath)
-		{
-			CurrentWeapon = MoveWeapon;
-		}
-
-		if (bHasPendingPredictedMove && PendingPredictedMove.InputSequence == ClientInputSequence)
-		{
-			const bool bMatchesPrediction = PendingPredictedMove.WeaponPath == WeaponPath
-				&& PendingPredictedMove.MoveIndex == MoveIndex;
-			ConfirmPredictedMove(ClientInputSequence, WeaponPath, MoveIndex);
-			if (bMatchesPrediction)
-			{
-				return;
-			}
-		}
-
-		CancelPredictedMove(false);
+		const float TargetPosition = FMath::Clamp(StartPosition, 0.f, PlayLength);
+		CachedAnimInstance->Montage_SetPosition(Move.Montage, TargetPosition);
+		CurrentMoveTime = TargetPosition;
 	}
 
-	PlayMovePresentation(MoveWeapon, MoveIndex, SectionName, PlayRate);
+	bPresentationActive = true;
+	OnAttackStarted.Broadcast(Move.MoveId);
 }
 
-void UCombatComponent::Multicast_StopMove_Implementation(const FSoftObjectPath& WeaponPath, int32 MoveIndex)
+UWeaponDataAsset* UCombatComponent::ResolveCurrentWeaponFromPath()
 {
-	if (GetOwner() && !GetOwner()->HasAuthority())
+	if (CurrentWeaponPath.IsNull())
 	{
-		CancelPredictedMove(false);
+		return CurrentWeapon;
 	}
 
-	UE_LOG(LogMHCombatNet, Log,
-		TEXT("[CombatNet] Multicast_StopMove received Owner=%s NetMode=%d LocalRole=%d Authority=%d MoveIndex=%d"),
-		GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
-		static_cast<int32>(GetWorld() ? GetWorld()->GetNetMode() : NM_Standalone),
-		GetOwner() ? static_cast<int32>(GetOwner()->GetLocalRole()) : -1,
-		GetOwner() && GetOwner()->HasAuthority() ? 1 : 0,
-		MoveIndex);
-	UWeaponDataAsset* MoveWeapon = Cast<UWeaponDataAsset>(WeaponPath.TryLoad());
-	StopMovePresentation(MoveWeapon, MoveIndex);
+	if (CurrentWeapon && FSoftObjectPath(CurrentWeapon) == CurrentWeaponPath)
+	{
+		return CurrentWeapon;
+	}
+
+	if (UWeaponDataAsset* Loaded = Cast<UWeaponDataAsset>(CurrentWeaponPath.TryLoad()))
+	{
+		CurrentWeapon = Loaded;
+	}
+
+	return CurrentWeapon;
 }
 
+void UCombatComponent::CommitActionState()
+{
+	++ActionState.Sequence;
+	ActionPositionSyncAccumulator = 0.f;
+	ApplyActionState();
+}
+
+void UCombatComponent::ApplyActionState()
+{
+	CacheOwnerReferences();
+	AppliedActionSequence = ActionState.Sequence;
+
+	if (!ActionState.bActive)
+	{
+		ClearPresentationState(ActionState.bInterrupted);
+		return;
+	}
+
+	UWeaponDataAsset* MoveWeapon = ResolveCurrentWeaponFromPath();
+	if (!MoveWeapon || !MoveWeapon->Moves.IsValidIndex(ActionState.MoveIndex))
+	{
+		UE_LOG(LogMHCombatNet, Warning,
+			TEXT("[CombatNet] ApplyActionState could not resolve move. Owner=%s Weapon=%d MoveIndex=%d"),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("null"),
+			MoveWeapon ? 1 : 0,
+			ActionState.MoveIndex);
+		return;
+	}
+
+	PlayMovePresentation(MoveWeapon, ActionState.MoveIndex, ActionState.SectionName, ActionState.PlayRate, ActionState.MontagePosition);
+	ApplyChargePresentation();
+}
+
+void UCombatComponent::SyncActionPresentation()
+{
+	if (!ActionState.bActive)
+	{
+		return;
+	}
+
+	// 同一动作内的状态刷新：只要蒙太奇还在放就不重播，只修正蓄力。
+	if (!CurrentMoveData.Montage || !CachedAnimInstance || !CachedAnimInstance->Montage_IsPlaying(CurrentMoveData.Montage))
+	{
+		// 本地表现已经丢了（相关性恢复、被别的蒙太奇顶掉等），用权威进度重新拉起。
+		ApplyActionState();
+		return;
+	}
+
+	ApplyChargePresentation();
+}
+
+void UCombatComponent::ApplyChargePresentation()
+{
+	if (!CachedAnimInstance || !CurrentMoveData.Montage)
+	{
+		return;
+	}
+
+	if (bChargeReleasePredicted)
+	{
+		// 本机已经预测松手，等服务器把 bCharging 置回 false 再对齐。
+		return;
+	}
+
+	const bool bShouldCharge = ActionState.bActive && ActionState.bCharging;
+	if (bIsCharging == bShouldCharge)
+	{
+		return;
+	}
+
+	bIsCharging = bShouldCharge;
+	if (CachedAnimInstance->Montage_IsPlaying(CurrentMoveData.Montage))
+	{
+		CachedAnimInstance->Montage_SetPlayRate(
+			CurrentMoveData.Montage,
+			CurrentMoveData.MontagePlayRate * (bShouldCharge ? ChargePlayRateScale : 1.f));
+	}
+}
+
+void UCombatComponent::ClearPresentationState(bool bInterrupted)
+{
+	CacheOwnerReferences();
+
+	if (CachedCharacter)
+	{
+		if (UAnimMontage* PlayingMontage = CurrentMoveData.Montage)
+		{
+			CachedCharacter->StopAnimMontage(PlayingMontage);
+		}
+	}
+
+	const bool bWasPresenting = bPresentationActive;
+	bPresentationActive = false;
+
+	CurrentMoveData = FMHCombatMoveData();
+	CurrentMoveId = NAME_None;
+	CurrentMoveIndex = INDEX_NONE;
+	CurrentMoveTime = 0.f;
+	CurrentChargeInputAction = nullptr;
+	bIsChargeMove = false;
+	bIsCharging = false;
+	bChargeInputHeld = false;
+	bChargeReleasePredicted = false;
+
+	if (bWasPresenting)
+	{
+		OnAttackEnded.Broadcast(bInterrupted);
+	}
+}
 void UCombatComponent::OnMove(const FVector2D& MoveInput)
 {
 	CurrentMoveInput = MoveInput;
@@ -1126,10 +1297,6 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex,
 		return false;
 	}
 
-	UAnimMontage* PreviousMontage = (CombatState == EMHCombatState::Attack)
-		? CurrentMoveData.Montage
-		: nullptr;
-
 	CurrentMoveData = Move;
 	CurrentMoveIndex = MoveIndex;
 	CurrentMoveId = Move.MoveId;
@@ -1143,10 +1310,11 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex,
 	ComboWindowCloseTime = 0.f;
 	HitActorsThisMove.Reset();
 
-	//bIsCharging = Move.bIsChargeMove;
 	bIsChargeMove = Move.bIsChargeMove;
 	CurrentChargeInputAction = Move.bIsChargeMove ? SourceInputAction : nullptr;
 	bChargeInputHeld = Move.bIsChargeMove && SourceInputAction != nullptr;
+	bIsCharging = false;
+	bChargeReleasePredicted = false;
 	
 	if (bLockGroundMovementDuringAttack && !IsAirborne())
 	{
@@ -1154,18 +1322,22 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex,
 	}
 
 	BindMontageDelegates();
-
-	if (PreviousMontage && PreviousMontage != CurrentMoveData.Montage)
-	{
-		CachedCharacter->StopAnimMontage(PreviousMontage);
-	}
-
 	const EMHCombatMovePhase InitialPhase = Move.bIsChargeMove
 		? EMHCombatMovePhase::Charge
 		: EMHCombatMovePhase::Startup;
 	SetCombatState(EMHCombatState::Attack, InitialPhase);
 
-	Multicast_PlayMove(CurrentWeaponPath, CurrentMoveIndex, CurrentMoveData.SectionName, CurrentMoveData.MontagePlayRate, ClientInputSequence);
+	// 把新动作写进复制状态：自增 Sequence 后立即在本机应用。
+	// 客户端靠 OnRep_ActionState 拿到同一份状态并开始播放。
+	ActionState.InputSequence = ClientInputSequence;
+	ActionState.bActive = true;
+	ActionState.MoveIndex = MoveIndex;
+	ActionState.SectionName = Move.SectionName;
+	ActionState.PlayRate = Move.MontagePlayRate;
+	ActionState.bCharging = false;
+	ActionState.bInterrupted = false;
+	ActionState.MontagePosition = 0.f;
+	CommitActionState();
 	return true;
 }
 
@@ -1227,19 +1399,9 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 		return;
 	}
 
-	UAnimMontage* PlayingMontage = CurrentMoveData.Montage;
-
-	const FSoftObjectPath MoveWeaponPath = CurrentWeaponPath;
-	const int32 MoveIndex = CurrentMoveIndex;
-	Multicast_StopMove(MoveWeaponPath, MoveIndex);
-
 	UpdateMovementLock(false);
 	SetCombatState(EMHCombatState::Locomotion, EMHCombatMovePhase::None);
 
-	CurrentMoveData = FMHCombatMoveData();
-	CurrentMoveId = NAME_None;
-	CurrentMoveTime = 0.f;
-	CurrentMoveIndex = INDEX_NONE;
 	ClearBufferedComboInput();
 	bHitExecuted = false;
 	bWeaponSwitchAllowed = false;
@@ -1248,17 +1410,13 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 	bComboWindowClosed = false;
 	ComboWindowCloseTime = 0.f;
 	HitActorsThisMove.Reset();
-	CurrentChargeInputAction = nullptr;
-	bIsChargeMove = false;
-	bIsCharging = false;
-	bChargeInputHeld = false;
-
-	if (PlayingMontage && CachedCharacter)
-	{
-		CachedCharacter->StopAnimMontage(PlayingMontage);
-	}
-
-	OnAttackEnded.Broadcast(bInterrupted);
+	// 停止表现（停蒙太奇、清缓存、广播 AttackEnded）统一交给状态层：
+	// 服务器和每个客户端走同一条路径，只有真正播出过动作的一端会广播。
+	ActionState.bActive = false;
+	ActionState.bInterrupted = bInterrupted;
+	ActionState.bCharging = false;
+	ActionState.MontagePosition = 0.f;
+	CommitActionState();
 }
 
 bool UCombatComponent::IsComboInputAllowed() const

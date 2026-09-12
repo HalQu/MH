@@ -50,6 +50,49 @@ enum class EMHCombatNotifyStateEvent : uint8
 	End UMETA(DisplayName = "End")
 };
 
+/**
+ * 权威动作状态：服务器写入并复制给所有客户端，客户端据此驱动蒙太奇表现。
+ * 这是状态而不是事件，因此迟到加入、短暂离开相关性、丢包重传后都能自动补齐。
+ */
+USTRUCT(BlueprintType)
+struct MH_API FMHCombatActionState
+{
+	GENERATED_BODY()
+
+	/** 动作开始/结束时自增；同一动作内的阶段、蓄力、播放位置变化不会自增。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	int32 Sequence = 0;
+
+	/** 触发本次动作的客户端输入序号，用于确认本地预测；服务器自行发起的动作为 INDEX_NONE。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	int32 InputSequence = INDEX_NONE;
+
+	/** false 表示当前没有动作在播放。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	bool bActive = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	int32 MoveIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	FName SectionName = NAME_None;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	float PlayRate = 1.f;
+
+	/** 蓄力中：客户端按 ChargePlayRateScale 减速播放。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	bool bCharging = false;
+
+	/** 仅在 bActive 由 true 变 false 时有意义。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	bool bInterrupted = false;
+
+	/** 服务器上蒙太奇的播放位置，用于迟到加入或重新进入相关性时对齐进度。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Combat|Action")
+	float MontagePosition = 0.f;
+};
+
 USTRUCT(BlueprintType)
 struct FComboCondition
 {

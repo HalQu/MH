@@ -39,6 +39,17 @@ struct FMHCombatPredictedMove
 	float PlayRate = 1.f;
 	float StartTime = 0.f;
 	UAnimMontage* Montage = nullptr;
+
+	bool bHadPreviousMove = false;
+	FMHCombatMoveData PreviousMoveData;
+	int32 PreviousMoveIndex = INDEX_NONE;
+	FName PreviousMoveId = NAME_None;
+	UAnimMontage* PreviousMontage = nullptr;
+	float PreviousMontagePosition = 0.f;
+	float PreviousEffectivePlayRate = 1.f;
+	bool bPreviousChargeMove = false;
+	bool bPreviousCharging = false;
+	bool bPreviousChargeInputHeld = false;
 };
 
 /*
@@ -150,6 +161,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Network", meta = (ClampMin = "0.1"))
 	float MovePredictionTimeout = 0.75f;
 
+	/** 蓄力阶段蒙太奇的减速倍率。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Settings", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float ChargePlayRateScale = 0.3f;
+
+	/** 服务器向客户端同步蒙太奇播放位置的间隔（秒）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Network", meta = (ClampMin = "0.0"))
+	float ActionPositionSyncInterval = 0.1f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	TObjectPtr<UWeaponDataAsset> CurrentWeapon = nullptr;
 
@@ -165,13 +184,18 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_CombatState, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	EMHCombatMovePhase MovePhase = EMHCombatMovePhase::None;
 
-	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	/** 权威动作状态：复制给所有客户端（含本机控制的客户端，用于确认本地预测）。 */
+	UPROPERTY(ReplicatedUsing = OnRep_ActionState, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	FMHCombatActionState ActionState;
+
+	/** 由 ActionState 派生，客户端在 OnRep 里写入。 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	FName CurrentMoveId = NAME_None;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	float CurrentMoveTime = 0.f;
 
-	UPROPERTY(ReplicatedUsing = OnRep_CurrentMoveIndex, VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|State")
 	int32 CurrentMoveIndex = INDEX_NONE;
 	int32 CurrentWeaponIndex = INDEX_NONE;
 
@@ -208,17 +232,24 @@ private:
 	UFUNCTION(Server, Reliable)
 	void Server_HandleComboInput(const FSoftObjectPath& InputActionPath, ETriggerEvent TriggerEvent, FVector2D MoveInput, float HoldDuration, int32 ClientInputSequence);
 
-	UFUNCTION(NetMulticast, Reliable)
-	void Multicast_PlayMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex, FName SectionName, float PlayRate, int32 ClientInputSequence);
+	/** 服务器：自增 Sequence 并立即在本地应用（服务器不会收到自己的 OnRep）。 */
+	void CommitActionState();
 
-	UFUNCTION(NetMulticast, Reliable)
-	void Multicast_StopMove(const FSoftObjectPath& WeaponPath, int32 MoveIndex);
+	/** 把权威动作状态应用到表现层：播片、停片、对齐进度、蓄力速率。 */
+	void ApplyActionState();
+
+	/** 同一动作内的增量刷新：只修正蓄力与进度，不会重播蒙太奇。 */
+	void SyncActionPresentation();
+
+	void ApplyChargePresentation();
+	void ClearPresentationState(bool bInterrupted);
+	UWeaponDataAsset* ResolveCurrentWeaponFromPath();
 
 	bool StartMove(const FMHCombatMoveData& Move, int32 MoveIndex, UInputAction* SourceInputAction, int32 ClientInputSequence);
 	bool TryStartAttack(const FMHCombatInputSnapshot& Input);
 	bool TryPredictMove(const FMHCombatInputSnapshot& Input, bool bChargeRelease);
-	void ConfirmPredictedMove(int32 ClientInputSequence, const FSoftObjectPath& WeaponPath, int32 MoveIndex);
-	void CancelPredictedMove(bool bTimedOut);
+	void ConfirmPredictedMove();
+	void CancelPredictedMove(bool bTimedOut, bool bRestorePrevious = true);
 	bool BufferNextCombo(const FMHCombatInputSnapshot& Input);
 	bool TryStartNextCombo();
 	const FMHCombatMoveData* GetMove(int32 MoveIndex) const;
@@ -227,8 +258,7 @@ private:
 	void ClearBufferedComboInput();
 	void FinishCurrentMove(bool bInterrupted);
 	void CacheOwnerReferences();
-	void PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate);
-	void StopMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex);
+	void PlayMovePresentation(UWeaponDataAsset* MoveWeapon, int32 MoveIndex, FName SectionName, float PlayRate, float StartPosition = 0.f);
 	void UpdateWeaponMesh(UWeaponDataAsset* NewWeapon);
 	void ReleaseCharge();
 	void HandleAttackStart();
@@ -250,7 +280,7 @@ private:
 	void OnRep_CombatState() const;
 
 	UFUNCTION()
-	void OnRep_CurrentMoveIndex();
+	void OnRep_ActionState();
 
 	UFUNCTION()
 	void HandleMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
@@ -270,10 +300,18 @@ private:
 	bool bIsCharging = false;
 	bool bChargeInputHeld = false;
 	float PendingServerHoldDuration = -1.f;
+	int32 AppliedActionSequence = 0;
+	float ActionPositionSyncAccumulator = 0.f;
 	int32 LocalInputSequence = 0;
 	int32 LastReceivedInputSequence = 0;
 	int32 PendingServerInputSequence = INDEX_NONE;
 	FMHCombatPredictedMove PendingPredictedMove;
 	bool bHasPendingPredictedMove = false;
+
+	/** 本地是否已经播出过一帧动作画面，用于保证 AttackStarted/Ended 成对。 */
+	bool bPresentationActive = false;
+
+	/** 本机控制的客户端已预测松手，在服务器确认前不被旧的蓄力状态拉回去。 */
+	bool bChargeReleasePredicted = false;
 
 };
