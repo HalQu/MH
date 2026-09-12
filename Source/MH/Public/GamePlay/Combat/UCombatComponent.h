@@ -277,7 +277,8 @@ private:
 	void EndHitWindow();
 	void PerformHitSweep();
 	FVector ResolveHitOrigin() const;
-	void PerformHitQuery(const FVector& Start, const FVector& End);
+	bool PerformHitQuery(const FVector& Start, const FVector& End);
+	void DrawDebugHitSweep(const FVector& Start, const FVector& End, float Radius, bool bHit) const;
 	bool TryApplyHit(AActor* Target, const FVector& HitLocation, const FVector& HitNormal);
 	void ApplyDamageToTarget(AActor* Target, const FVector& HitLocation, const FVector& HitNormal);
 	float ResolveDamage(const FMHCombatMoveData& MoveData) const;

@@ -6,6 +6,9 @@
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/OverlapResult.h"
+#if ENABLE_DRAW_DEBUG
+#include "DrawDebugHelpers.h"
+#endif
 #include "InputAction.h"
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/Character.h"
@@ -14,6 +17,14 @@
 #include "GamePlay/Combat/UWeaponDataAsset.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMHCombatNet, Log, All);
+
+#if ENABLE_DRAW_DEBUG
+static TAutoConsoleVariable<float> CVarMHCombatDrawHitSweep(
+	TEXT("mh.Combat.DrawHitSweep"),
+	0.f,
+	TEXT("绘制服务器武器命中扫掠。参数是持续时间，0 为关闭，例如 0.5。"),
+	ECVF_Cheat);
+#endif
 
 UCombatComponent::UCombatComponent()
 {
@@ -1566,15 +1577,17 @@ void UCombatComponent::BeginHitWindow()
 	bHasPreviousHitOrigin = true;
 	PreviousHitOrigin = ResolveHitOrigin();
 
+	const float Radius = FMath::Max(CurrentMoveData.HitRadius, 20.f);
 	// 窗口开始时目标可能已经和武器重叠，先做一次零长度查询。
-	PerformHitQuery(PreviousHitOrigin, PreviousHitOrigin);
+	const bool bHit = PerformHitQuery(PreviousHitOrigin, PreviousHitOrigin);
+	DrawDebugHitSweep(PreviousHitOrigin, PreviousHitOrigin, Radius, bHit);
 
 	UE_LOG(LogMHCombatNet, Log,
 		TEXT("[CombatNet] Attack hit window begin. Attacker=%s Move=%s Origin=%s Radius=%.1f"),
 		CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
 		*CurrentMoveData.MoveId.ToString(),
 		*PreviousHitOrigin.ToString(),
-		FMath::Max(CurrentMoveData.HitRadius, 20.f));
+		Radius);
 }
 
 void UCombatComponent::EndHitWindow()
@@ -1606,7 +1619,12 @@ void UCombatComponent::PerformHitSweep()
 		bHasPreviousHitOrigin = true;
 	}
 
-	PerformHitQuery(PreviousHitOrigin, CurrentHitOrigin);
+	const bool bHit = PerformHitQuery(PreviousHitOrigin, CurrentHitOrigin);
+	DrawDebugHitSweep(
+		PreviousHitOrigin,
+		CurrentHitOrigin,
+		FMath::Max(CurrentMoveData.HitRadius, 20.f),
+		bHit);
 	PreviousHitOrigin = CurrentHitOrigin;
 }
 
@@ -1631,13 +1649,14 @@ FVector UCombatComponent::ResolveHitOrigin() const
 		+ CachedCharacter->GetActorForwardVector() * ForwardOffset;
 }
 
-void UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
+bool UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
 {
 	if (!GetWorld() || !CachedCharacter || !CachedMesh)
 	{
-		return;
+		return false;
 	}
 
+	bool bAppliedHit = false;
 	const float Radius = FMath::Max(CurrentMoveData.HitRadius, 20.f);
 	const FCollisionShape HitShape = FCollisionShape::MakeSphere(Radius);
 	const FCollisionQueryParams QueryParams(FName(TEXT("MHCombatHit")), false, CachedCharacter);
@@ -1648,7 +1667,7 @@ void UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
 		TArray<FOverlapResult> Overlaps;
 		if (!GetWorld()->OverlapMultiByChannel(Overlaps, End, FQuat::Identity, ECC_Pawn, HitShape, QueryParams))
 		{
-			return;
+			return false;
 		}
 
 		for (const FOverlapResult& Overlap : Overlaps)
@@ -1662,16 +1681,16 @@ void UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
 			const FVector HitLocation = Overlap.Component.IsValid()
 				? Overlap.Component->GetComponentLocation()
 				: Target->GetActorLocation();
-			TryApplyHit(Target, HitLocation, -CachedCharacter->GetActorForwardVector());
+			bAppliedHit |= TryApplyHit(Target, HitLocation, -CachedCharacter->GetActorForwardVector());
 		}
 
-		return;
+		return bAppliedHit;
 	}
 
 	TArray<FHitResult> Hits;
 	if (!GetWorld()->SweepMultiByChannel(Hits, Start, End, FQuat::Identity, ECC_Pawn, HitShape, QueryParams))
 	{
-		return;
+		return false;
 	}
 
 	for (const FHitResult& Hit : Hits)
@@ -1693,8 +1712,44 @@ void UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
 		const FVector HitNormal = Hit.ImpactNormal.IsNearlyZero()
 			? FVector(-CachedCharacter->GetActorForwardVector())
 			: FVector(Hit.ImpactNormal);
-		TryApplyHit(Target, HitLocation, HitNormal);
+		bAppliedHit |= TryApplyHit(Target, HitLocation, HitNormal);
 	}
+
+	return bAppliedHit;
+}
+
+void UCombatComponent::DrawDebugHitSweep(const FVector& Start, const FVector& End, float Radius, bool bHit) const
+{
+#if ENABLE_DRAW_DEBUG
+	const float DrawTime = CVarMHCombatDrawHitSweep.GetValueOnAnyThread();
+	if (DrawTime <= 0.f || !GetWorld())
+	{
+		return;
+	}
+
+	const FColor Color = bHit ? FColor::Red : FColor::Yellow;
+	DrawDebugSphere(GetWorld(), Start, Radius, 16, Color, false, DrawTime, 0, 1.f);
+	DrawDebugSphere(GetWorld(), End, Radius, 16, Color, false, DrawTime, 0, 1.f);
+	DrawDebugLine(GetWorld(), Start, End, Color, false, DrawTime, 0, 1.5f);
+
+	const FVector Delta = End - Start;
+	if (!Delta.IsNearlyZero())
+	{
+		const FVector Center = (Start + End) * 0.5f;
+		const FQuat Rotation = Delta.Rotation().Quaternion();
+		DrawDebugCapsule(
+			GetWorld(),
+			Center,
+			Delta.Size() * 0.5f,
+			Radius,
+			Rotation,
+			FColor(Color.R, Color.G, Color.B, 48),
+			false,
+			DrawTime,
+			0,
+			0.5f);
+	}
+#endif
 }
 
 bool UCombatComponent::TryApplyHit(AActor* Target, const FVector& HitLocation, const FVector& HitNormal)
