@@ -40,7 +40,8 @@ enum class EMHCombatNotifyStateType : uint8
 {
 	ChargeWindow UMETA(DisplayName = "Charge Window"),
 	ComboWindow UMETA(DisplayName = "Combo Window"),
-	WeaponSwitchAllowed UMETA(DisplayName = "Weapon Switch Allowed")
+	WeaponSwitchAllowed UMETA(DisplayName = "Weapon Switch Allowed"),
+	AttackHitWindow UMETA(DisplayName = "Attack Hit Window")
 };
 
 UENUM(BlueprintType)

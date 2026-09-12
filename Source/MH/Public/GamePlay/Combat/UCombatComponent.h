@@ -229,6 +229,9 @@ protected:
 	TObjectPtr<UInputAction> CurrentChargeInputAction = nullptr;
 
 	bool bHitExecuted = false;
+	bool bHitWindowActive = false;
+	bool bHasPreviousHitOrigin = false;
+	FVector PreviousHitOrigin = FVector::ZeroVector;
 	bool bWeaponSwitchAllowed = false;
 	bool bMontageDelegatesBound = false;
 	bool bMovementLocked = false;
@@ -270,6 +273,12 @@ private:
 	void ReleaseCharge();
 	void HandleAttackStart();
 	void PerformHitCheck();
+	void BeginHitWindow();
+	void EndHitWindow();
+	void PerformHitSweep();
+	FVector ResolveHitOrigin() const;
+	void PerformHitQuery(const FVector& Start, const FVector& End);
+	bool TryApplyHit(AActor* Target, const FVector& HitLocation, const FVector& HitNormal);
 	void ApplyDamageToTarget(AActor* Target, const FVector& HitLocation, const FVector& HitNormal);
 	float ResolveDamage(const FMHCombatMoveData& MoveData) const;
 	void UpdateMovementLock(bool bLock);

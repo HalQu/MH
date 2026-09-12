@@ -156,6 +156,12 @@ void UCombatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 		return;
 	}
 
+	// 命中窗口是持续状态，服务器在每个 Tick 对武器上一帧到当前帧的轨迹做扫掠。
+	if (bHitWindowActive)
+	{
+		PerformHitSweep();
+	}
+
 	// 蓄力开关与播放进度是同一个动作内部的增量数据，直接写进复制状态。
 	// 客户端收到后只做表现修正，不会重播蒙太奇（Sequence 没有变化）。
 	if (ActionState.bCharging != bIsCharging)
@@ -913,6 +919,32 @@ void UCombatComponent::HandleCombatNotifyState(EMHCombatNotifyStateType StateTyp
 			bWeaponSwitchAllowed = false;
 		}
 		break;
+	case EMHCombatNotifyStateType::AttackHitWindow:
+		if (!GetOwner() || !GetOwner()->HasAuthority())
+		{
+			break;
+		}
+
+		if (StateEvent == EMHCombatNotifyStateEvent::Begin)
+		{
+			if (MovePhase == EMHCombatMovePhase::Active)
+			{
+				BeginHitWindow();
+			}
+			else
+			{
+				UE_LOG(LogMHCombatNet, Warning,
+					TEXT("[CombatNet] AttackHitWindow ignored before Active phase. Owner=%s Move=%s Phase=%d"),
+					CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
+					*CurrentMoveData.MoveId.ToString(),
+					static_cast<int32>(MovePhase));
+			}
+		}
+		else if (StateEvent == EMHCombatNotifyStateEvent::End)
+		{
+			EndHitWindow();
+		}
+		break;
 	}
 }
 
@@ -1286,6 +1318,8 @@ void UCombatComponent::ClearPresentationState(bool bInterrupted)
 	bIsCharging = false;
 	bChargeInputHeld = false;
 	bChargeReleasePredicted = false;
+	bHitWindowActive = false;
+	bHasPreviousHitOrigin = false;
 
 	if (bWasPresenting)
 	{
@@ -1330,6 +1364,8 @@ bool UCombatComponent::StartMove(const FMHCombatMoveData& Move, int32 MoveIndex,
 	CurrentMoveTime = 0.f;
 	ClearBufferedComboInput();
 	bHitExecuted = false;
+	bHitWindowActive = false;
+	bHasPreviousHitOrigin = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
 	bComboWindowPending = true;
@@ -1431,6 +1467,8 @@ void UCombatComponent::FinishCurrentMove(bool bInterrupted)
 
 	ClearBufferedComboInput();
 	bHitExecuted = false;
+	bHitWindowActive = false;
+	bHasPreviousHitOrigin = false;
 	bWeaponSwitchAllowed = false;
 	bComboWindowOpen = false;
 	bComboWindowPending = false;
@@ -1515,6 +1553,166 @@ void UCombatComponent::HandleAttackStart()
 	{
 		SetCombatState(CombatState, EMHCombatMovePhase::Active);
 	}
+}
+
+void UCombatComponent::BeginHitWindow()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !CachedCharacter || !CachedMesh)
+	{
+		return;
+	}
+
+	bHitWindowActive = true;
+	bHasPreviousHitOrigin = true;
+	PreviousHitOrigin = ResolveHitOrigin();
+
+	// 窗口开始时目标可能已经和武器重叠，先做一次零长度查询。
+	PerformHitQuery(PreviousHitOrigin, PreviousHitOrigin);
+
+	UE_LOG(LogMHCombatNet, Log,
+		TEXT("[CombatNet] Attack hit window begin. Attacker=%s Move=%s Origin=%s Radius=%.1f"),
+		CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
+		*CurrentMoveData.MoveId.ToString(),
+		*PreviousHitOrigin.ToString(),
+		FMath::Max(CurrentMoveData.HitRadius, 20.f));
+}
+
+void UCombatComponent::EndHitWindow()
+{
+	if (bHitWindowActive)
+	{
+		UE_LOG(LogMHCombatNet, Log,
+			TEXT("[CombatNet] Attack hit window end. Attacker=%s Move=%s HitTargets=%d"),
+			CachedCharacter ? *CachedCharacter->GetName() : TEXT("null"),
+			*CurrentMoveData.MoveId.ToString(),
+			HitActorsThisMove.Num());
+	}
+
+	bHitWindowActive = false;
+	bHasPreviousHitOrigin = false;
+}
+
+void UCombatComponent::PerformHitSweep()
+{
+	if (!bHitWindowActive || !CachedCharacter || !CachedMesh || !CurrentWeapon || !GetWorld())
+	{
+		return;
+	}
+
+	const FVector CurrentHitOrigin = ResolveHitOrigin();
+	if (!bHasPreviousHitOrigin)
+	{
+		PreviousHitOrigin = CurrentHitOrigin;
+		bHasPreviousHitOrigin = true;
+	}
+
+	PerformHitQuery(PreviousHitOrigin, CurrentHitOrigin);
+	PreviousHitOrigin = CurrentHitOrigin;
+}
+
+FVector UCombatComponent::ResolveHitOrigin() const
+{
+	if (!CachedCharacter || !CachedMesh)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FName SocketName = CurrentMoveData.HitOriginSocketName.IsNone()
+		? DefaultHitOriginSocketName
+		: CurrentMoveData.HitOriginSocketName;
+
+	if (CachedMesh->DoesSocketExist(SocketName))
+	{
+		return CachedMesh->GetSocketLocation(SocketName);
+	}
+
+	const float ForwardOffset = FMath::Max(CurrentMoveData.HitRange, 0.f) * 0.5f;
+	return CachedCharacter->GetActorLocation()
+		+ CachedCharacter->GetActorForwardVector() * ForwardOffset;
+}
+
+void UCombatComponent::PerformHitQuery(const FVector& Start, const FVector& End)
+{
+	if (!GetWorld() || !CachedCharacter || !CachedMesh)
+	{
+		return;
+	}
+
+	const float Radius = FMath::Max(CurrentMoveData.HitRadius, 20.f);
+	const FCollisionShape HitShape = FCollisionShape::MakeSphere(Radius);
+	const FCollisionQueryParams QueryParams(FName(TEXT("MHCombatHit")), false, CachedCharacter);
+	const bool bHasMovement = FVector::DistSquared(Start, End) > FMath::Square(0.1f);
+
+	if (!bHasMovement)
+	{
+		TArray<FOverlapResult> Overlaps;
+		if (!GetWorld()->OverlapMultiByChannel(Overlaps, End, FQuat::Identity, ECC_Pawn, HitShape, QueryParams))
+		{
+			return;
+		}
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			AActor* Target = Overlap.GetActor();
+			if (!Target)
+			{
+				continue;
+			}
+
+			const FVector HitLocation = Overlap.Component.IsValid()
+				? Overlap.Component->GetComponentLocation()
+				: Target->GetActorLocation();
+			TryApplyHit(Target, HitLocation, -CachedCharacter->GetActorForwardVector());
+		}
+
+		return;
+	}
+
+	TArray<FHitResult> Hits;
+	if (!GetWorld()->SweepMultiByChannel(Hits, Start, End, FQuat::Identity, ECC_Pawn, HitShape, QueryParams))
+	{
+		return;
+	}
+
+	for (const FHitResult& Hit : Hits)
+	{
+		AActor* Target = Hit.GetActor();
+		if (!Target)
+		{
+			continue;
+		}
+
+		FVector HitLocation(Hit.ImpactPoint);
+		if (HitLocation.IsNearlyZero())
+		{
+			HitLocation = Hit.Component.IsValid()
+				? Hit.Component->GetComponentLocation()
+				: Target->GetActorLocation();
+		}
+
+		const FVector HitNormal = Hit.ImpactNormal.IsNearlyZero()
+			? FVector(-CachedCharacter->GetActorForwardVector())
+			: FVector(Hit.ImpactNormal);
+		TryApplyHit(Target, HitLocation, HitNormal);
+	}
+}
+
+bool UCombatComponent::TryApplyHit(AActor* Target, const FVector& HitLocation, const FVector& HitNormal)
+{
+	if (!Target
+		|| Target == CachedCharacter
+		|| !Target->GetClass()->ImplementsInterface(UMHCombatTargetInterface::StaticClass())
+		|| HitActorsThisMove.ContainsByPredicate([Target](const TWeakObjectPtr<AActor>& ExistingHit)
+		{
+			return ExistingHit.Get() == Target;
+		}))
+	{
+		return false;
+	}
+
+	HitActorsThisMove.Add(Target);
+	ApplyDamageToTarget(Target, HitLocation, HitNormal);
+	return true;
 }
 
 void UCombatComponent::PerformHitCheck()
