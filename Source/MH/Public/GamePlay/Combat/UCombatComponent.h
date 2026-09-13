@@ -229,9 +229,6 @@ protected:
 	TObjectPtr<UInputAction> CurrentChargeInputAction = nullptr;
 
 	bool bHitExecuted = false;
-	bool bHitWindowActive = false;
-	bool bHasPreviousHitOrigin = false;
-	FVector PreviousHitOrigin = FVector::ZeroVector;
 	bool bWeaponSwitchAllowed = false;
 	bool bMontageDelegatesBound = false;
 	bool bMovementLocked = false;
@@ -316,6 +313,9 @@ private:
 	bool bIsChargeMove = false;
 	bool bIsCharging = false;
 	bool bChargeInputHeld = false;
+	bool bHitWindowActive = false;
+	bool bHasPreviousHitOrigin = false;
+	FVector PreviousHitOrigin = FVector::ZeroVector;
 	float PendingServerHoldDuration = -1.f;
 	int32 AppliedActionSequence = 0;
 	float ActionPositionSyncAccumulator = 0.f;
