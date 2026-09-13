@@ -17,5 +17,5 @@ class MH_API IMHCombatTargetInterface
 
 public:
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Combat")
-	void ReceiveDamage(const FMHDamageEvent& DamageEvent);
+	FMHDamageResult ReceiveDamage(const FMHDamageEvent& DamageEvent);
 };

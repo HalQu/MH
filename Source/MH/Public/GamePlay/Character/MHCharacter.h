@@ -13,6 +13,8 @@ class UInputMappingContext;
 class UInputAction;
 class UCombatComponent;
 class UHealthComponent;
+class UHitReactionComponent;
+class UCombatFeedbackComponent;
 
 UCLASS()
 class MH_API AMHCharacter : public ACharacter, public IMHCombatTargetInterface
@@ -30,10 +32,16 @@ public:
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
 	/** IMHCombatTargetInterface：收到伤害请求，实际扣血由 UHealthComponent 处理。 */
-	virtual void ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent) override;
+	virtual FMHDamageResult ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent) override;
 
 	UFUNCTION(BlueprintPure, Category = "Combat|Health")
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Combat|HitReaction")
+	UHitReactionComponent* GetHitReactionComponent() const { return HitReactionComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Combat|Feedback")
+	UCombatFeedbackComponent* GetCombatFeedbackComponent() const { return CombatFeedbackComponent; }
 
 protected:
 
@@ -51,6 +59,12 @@ protected:
 	//Combat|Health
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Health")
 	TObjectPtr<class UHealthComponent> HealthComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|HitReaction")
+	TObjectPtr<class UHitReactionComponent> HitReactionComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Feedback")
+	TObjectPtr<class UCombatFeedbackComponent> CombatFeedbackComponent;
 
 	//input
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -90,4 +104,6 @@ private:
 
 	void EquipWeapon(const FInputActionValue& Value);
 	void HandleAttackInput(const FInputActionValue& Value, TObjectPtr<UInputAction> InputAction, ETriggerEvent TriggerEvent);
+	void HandleJumpPressed();
+	void HandleJumpReleased();
 };

@@ -8,6 +8,8 @@
 #include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GamePlay/Combat/UCombatComponent.h"
+#include "GamePlay/Combat/UCombatFeedbackComponent.h"
+#include "GamePlay/Combat/UHitReactionComponent.h"
 #include "GamePlay/Combat/UHealthComponent.h"
 // Sets default values
 AMHCharacter::AMHCharacter()
@@ -35,6 +37,8 @@ AMHCharacter::AMHCharacter()
 
 	CombatComponent = CreateDefaultSubobject<UCombatComponent>(TEXT("CombatComponent"));
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	HitReactionComponent = CreateDefaultSubobject<UHitReactionComponent>(TEXT("HitReactionComponent"));
+	CombatFeedbackComponent = CreateDefaultSubobject<UCombatFeedbackComponent>(TEXT("CombatFeedbackComponent"));
 
 	bUseControllerRotationYaw = false;
 	GetCharacterMovement()->bOrientRotationToMovement = true;
@@ -52,12 +56,40 @@ void AMHCharacter::BeginPlay()
 	}
 }
 
-void AMHCharacter::ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent)
+FMHDamageResult AMHCharacter::ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent)
 {
-	if (HealthComponent)
+	FMHDamageResult Result;
+	if (!HealthComponent)
 	{
-		HealthComponent->ApplyDamage(DamageEvent);
+		return Result;
 	}
+
+	Result.bHit = true;
+	Result.HitReactionId = DamageEvent.HitReactionId;
+
+	// Invulnerability is checked before health so an invulnerable target never loses HP.
+	if (HitReactionComponent && !HitReactionComponent->CanReceiveHit())
+	{
+		Result.bInvulnerable = true;
+		Result.RemainingHealth = HealthComponent->GetHealth();
+		return Result;
+	}
+
+	Result.AppliedDamage = HealthComponent->ApplyDamage(DamageEvent);
+	Result.RemainingHealth = HealthComponent->GetHealth();
+	Result.bKilled = HealthComponent->IsDead();
+
+	if (HitReactionComponent)
+	{
+		HitReactionComponent->HandleConfirmedHit(DamageEvent, Result);
+	}
+
+	if (Result.bInterruptedTarget && CombatComponent)
+	{
+		CombatComponent->CancelCurrentAttack();
+	}
+
+	return Result;
 }
 
 void AMHCharacter::HandleDeath()
@@ -91,8 +123,8 @@ void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 
 		if (IA_Jump)
 		{
-			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Started, this, &AMHCharacter::Jump);
-			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Completed, this, &AMHCharacter::StopJumping);
+			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Started, this, &AMHCharacter::HandleJumpPressed);
+			EnhancedInput->BindAction(IA_Jump, ETriggerEvent::Completed, this, &AMHCharacter::HandleJumpReleased);
 		}
 
 		if (IA_EquipWeapon)
@@ -111,6 +143,11 @@ void AMHCharacter::Tick(float DeltaTime)
 
 void AMHCharacter::Move(const FInputActionValue& Value)
 {
+	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	{
+		return;
+	}
+
 	// Retrieve 2D input vector (X: right/left, Y: forward/backward)
 	InputVector = Value.Get<FVector2D>();
 
@@ -140,6 +177,21 @@ void AMHCharacter::StopMove()
 	}
 }
 
+void AMHCharacter::HandleJumpPressed()
+{
+	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	{
+		return;
+	}
+
+	Jump();
+}
+
+void AMHCharacter::HandleJumpReleased()
+{
+	StopJumping();
+}
+
 
 
 void AMHCharacter::Look(const FInputActionValue& Value)
@@ -156,6 +208,11 @@ void AMHCharacter::Look(const FInputActionValue& Value)
 
 void AMHCharacter::EquipWeapon(const FInputActionValue& Value)
 {
+	if (HitReactionComponent && HitReactionComponent->IsReacting())
+	{
+		return;
+	}
+
 	if (CombatComponent)
 	{
 		CombatComponent->EquipWeapon_Default();
