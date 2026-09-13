@@ -34,6 +34,7 @@ void UUIEventBus::Broadcast(FName EventName)
     BroadcastInternal(EventName, Empty, FUIEmptyPayload::StaticStruct());
 }
 
+// 同一事件名的递归广播会被丢弃，避免监听者再次 Broadcast 导致无限递归。
 void UUIEventBus::BroadcastInternal(
     FName EventName,
     const FUIEventPayload& Payload,

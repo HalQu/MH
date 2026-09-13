@@ -448,6 +448,7 @@ UAnimInstance* UHitReactionComponent::GetOwningAnimInstance() const
 	return Character && Character->GetMesh() ? Character->GetMesh()->GetAnimInstance() : nullptr;
 }
 
+	// 客户端表现入口：Sequence 变化才算一次新的受击/结束，避免复制重发导致蒙太奇反复重播。
 void UHitReactionComponent::OnRep_ReactionState()
 {
 	const bool bNewReactionState = ReactionState.Sequence != AppliedReactionSequence;

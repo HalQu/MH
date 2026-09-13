@@ -644,6 +644,7 @@ void UUIManager::ApplyRemoveFromParent(UBaseScreen* Screen)
     OwnedScreens.Remove(Screen);
 }
 
+// 关闭动画可能跨帧，这里只做倒计时；归零后再从视口和 OwnedScreens 中真正移除。
 void UUIManager::Tick(float DeltaTime)
 {
     for (int32 Index = PendingRemovals.Num() - 1; Index >= 0; --Index)

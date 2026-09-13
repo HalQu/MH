@@ -36,6 +36,7 @@ void UCombatFeedbackComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+	// 每台机器都会收到同一份命中事件；世界特效只由攻击者本机生成，避免 N 份重复表现。
 void UCombatFeedbackComponent::HandleHitConfirmed(const FMHCombatHitEvent& HitEvent)
 {
 	OnHitFeedbackReceived.Broadcast(HitEvent);
