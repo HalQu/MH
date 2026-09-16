@@ -169,6 +169,8 @@ void UCombatComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(UCombatComponent, CurrentWeaponPath);
 	// ActionState is the single logical-state source. Clients restore it, then replay unacknowledged commands.
 	DOREPLIFETIME(UCombatComponent, ActionState);
+	// 命中表现事件走复制属性下发，不再依赖多播 RPC（详见头文件说明）。
+	DOREPLIFETIME(UCombatComponent, ReplicatedHitEvents);
 	// Only the owning client needs the acknowledgement watermark for prediction reconciliation.
 	DOREPLIFETIME_CONDITION(UCombatComponent, LastProcessedInputSequence, COND_OwnerOnly);
 }
@@ -2347,7 +2349,8 @@ bool UCombatComponent::ApplyDamageToTarget(AActor* Target, const FVector& HitLoc
 	DamageEvent.Damage = ResolveDamage(CurrentMoveData);
 	DamageEvent.HitLocation = HitLocation;
 	DamageEvent.HitNormal = HitNormal;
-	DamageEvent.LaunchImpulse = CurrentMoveData.LaunchImpulse;
+	// 只传强度，击退方向由受击方按当时的相对位置推算，避免锁死世界坐标方向。
+	DamageEvent.LaunchStrength = CurrentMoveData.LaunchStrength;
 	DamageEvent.HitId = ++LastHitId;
 	DamageEvent.MoveIndex = CurrentMoveIndex;
 	DamageEvent.MoveId = CurrentMoveData.MoveId;
@@ -2380,10 +2383,11 @@ bool UCombatComponent::ApplyDamageToTarget(AActor* Target, const FVector& HitLoc
 	HitEvent.bSuperArmorBlocked = DamageResult.bSuperArmorBlocked;
 	HitEvent.Feedback = CurrentMoveData.HitFeedback;
 
-	// The local call plus the multicast keeps listen servers responsive; ProcessConfirmedHit
-	// deduplicates by HitId if the RPC invokes its implementation locally as well.
+	// 服务器本地先处理一份，保证监听服务器（主机自己就是玩家）没有额外延迟；
+	// 其余端从 ReplicatedHitEvents 复制过去，ProcessConfirmedHit 内部按 HitId 去重。
 	ProcessConfirmedHit(HitEvent);
-	Multicast_BroadcastHitEvent(HitEvent);
+	// 服务器本地立即处理一份（监听服务器要保持零延迟），其余端由复制队列补上。
+	PushReplicatedHitEvent(HitEvent);
 
 	if (GetCombatNetLogLevel() >= 1)
 	{
@@ -2407,9 +2411,25 @@ float UCombatComponent::ResolveDamage(const FMHCombatMoveData& MoveData) const
 	return MoveData.Damage * DamageMultiplier;
 }
 
-void UCombatComponent::Multicast_BroadcastHitEvent_Implementation(const FMHCombatHitEvent& HitEvent)
+void UCombatComponent::PushReplicatedHitEvent(const FMHCombatHitEvent& HitEvent)
 {
-	ProcessConfirmedHit(HitEvent);
+	// 只保留最近若干条：复制队列不是日志，旧事件再发一遍没有意义，反而占带宽。
+	constexpr int32 MaxHistory = 8;
+	while (ReplicatedHitEvents.Num() >= MaxHistory)
+	{
+		ReplicatedHitEvents.RemoveAt(0, 1, EAllowShrinking::No);
+	}
+
+	ReplicatedHitEvents.Add(HitEvent);
+}
+
+void UCombatComponent::OnRep_ReplicatedHitEvents()
+{
+	// 复制的是整个数组，已经处理过的条目靠 ProcessConfirmedHit 里的 HitId 去重。
+	for (const FMHCombatHitEvent& HitEvent : ReplicatedHitEvents)
+	{
+		ProcessConfirmedHit(HitEvent);
+	}
 }
 
 void UCombatComponent::ProcessConfirmedHit(const FMHCombatHitEvent& HitEvent)
@@ -2431,6 +2451,18 @@ void UCombatComponent::ProcessConfirmedHit(const FMHCombatHitEvent& HitEvent)
 
 	LastConfirmedHitEvent = HitEvent;
 	OnHitConfirmed.Broadcast(LastConfirmedHitEvent);
+
+	if (GetCombatNetLogLevel() >= 1 && GetWorld())
+	{
+		// 每台机器都会打一行：排查「主机看得到、客户端看不到」时，先看客户端有没有这行。
+		UE_LOG(LogMHCombatNet, Log,
+			TEXT("[CombatNet] Hit event processed. HitId=%d NetMode=%d Owner=%s Attacker=%s Effect=%s"),
+			HitEvent.HitId,
+			static_cast<int32>(GetWorld()->GetNetMode()),
+			*GetNameSafe(GetOwner()),
+			*GetNameSafe(HitEvent.Attacker),
+			*HitEvent.Feedback.ImpactEffect.ToString());
+	}
 }
 
 // ---------------------------------------------------------------------------

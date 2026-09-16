@@ -610,12 +610,24 @@ protected:
 	/** 计算最终伤害：动作基础伤害（或覆盖值） * DamageMultiplier。 */
 	float ResolveDamage(const FMHCombatMoveData& MoveData) const;
 
+
 	/**
-	 * 服务器确认命中后向所有端广播同一份事件。
-	 * 用 Reliable + 事件 Id 去重，保证打击反馈不丢、也不重复结算。
+	 * 最近一批确认命中事件，由服务器追加并复制给所有端（含攻击者自己的客户端）。
+	 *
+	 * 为什么不用多播 RPC：多播是「发出去就不管」的一次性消息，一旦丢失或落后于复制流，
+	 * 表现与逻辑就会不一致（服务器看到特效、客户端看不到）。改成复制属性后，
+	 * 丢包只需等下一个包补上，服务端与客户端看到的是同一份事件，客户端再用 HitId 去重。
+	 * 保留一小段历史是为了兼容一次网络更新里发生多次命中的情况，避免只收到最后一条。
 	 */
-	UFUNCTION(NetMulticast, Reliable)
-	void Multicast_BroadcastHitEvent(const FMHCombatHitEvent& HitEvent);
+	UPROPERTY(ReplicatedUsing = OnRep_ReplicatedHitEvents, Transient)
+	TArray<FMHCombatHitEvent> ReplicatedHitEvents;
+
+	/** 客户端收到命中事件批次：逐条去重后转成 OnHitConfirmed。 */
+	UFUNCTION()
+	void OnRep_ReplicatedHitEvents();
+
+	/** 服务器把一次确认命中追加进复制队列（只保留最近的若干条）。 */
+	void PushReplicatedHitEvent(const FMHCombatHitEvent& HitEvent);
 
 	/** 统一处理确认命中：缓存事件、去重，并向 UI/反馈组件广播。 */
 	void ProcessConfirmedHit(const FMHCombatHitEvent& HitEvent);

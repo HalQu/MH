@@ -143,7 +143,7 @@ void AMHCharacter::Tick(float DeltaTime)
 
 void AMHCharacter::Move(const FInputActionValue& Value)
 {
-	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	if (IsMovementInputBlocked())
 	{
 		return;
 	}
@@ -179,7 +179,7 @@ void AMHCharacter::StopMove()
 
 void AMHCharacter::HandleJumpPressed()
 {
-	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	if (IsMovementInputBlocked())
 	{
 		return;
 	}
@@ -203,6 +203,18 @@ void AMHCharacter::Look(const FInputActionValue& Value)
 	AddControllerYawInput(LookVector.X);
 	AddControllerPitchInput(LookVector.Y);
 
+}
+
+// 硬直来自权威受击状态，顿帧来自攻击方本机的打击表现；两者任一成立都不接受移动输入。
+bool AMHCharacter::IsMovementInputBlocked() const
+{
+	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	{
+		return true;
+	}
+
+	// 顿帧只在攻击方本机触发，但它必须冻结本机输入，否则按住方向键会直接穿帮。
+	return CombatFeedbackComponent && CombatFeedbackComponent->IsHitStopActive();
 }
 
 

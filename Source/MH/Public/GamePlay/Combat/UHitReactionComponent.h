@@ -154,6 +154,8 @@ protected:
 private:
 	/** 根据命中来源与自身朝向算出前 / 后 / 左 / 右，用于选择方向蒙太奇。 */
 	EMHHitReactionDirection ResolveHitDirection(const FMHDamageEvent& DamageEvent) const;
+	/** 算击退方向：优先背离攻击者，其次背离命中点，最后用命中法线反向兜底。 */
+	FVector ResolveKnockbackDirection(const FMHDamageEvent& DamageEvent) const;
 	/** 按 ReactionId 查配置，查不到时回落到 DefaultReactionId。 */
 	const FMHHitReactionDefinition* ResolveReactionDefinition(FName ReactionId) const;
 	/** 在配置里按方向挑蒙太奇，方向项为空时使用 DefaultMontage。 */
@@ -167,7 +169,7 @@ private:
 	void PlayHitReactionPresentation(const FMHHitReactionState& State);
 	/** 停止当前受击蒙太奇，BlendOutTime 控制淡出时间。 */
 	void StopHitReactionPresentation(float BlendOutTime = 0.08f);
-	/** 服务器：按 DamageEvent.LaunchImpulse 与配置的 LaunchScale 施加击退。 */
+	/** 服务器：按 DamageEvent.LaunchStrength 施加击退，方向在这里按命中来源现算。 */
 	void ApplyLaunch(const FMHDamageEvent& DamageEvent, const FMHHitReactionDefinition* Definition);
 	/** 服务器每帧：处理无敌到期、硬直结束、韧性回复。 */
 	void UpdateServerState(float DeltaTime);

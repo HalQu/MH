@@ -375,16 +375,55 @@ void UHitReactionComponent::StopHitReactionPresentation(float BlendOutTime)
 	}
 }
 
+// 击退方向完全在受击时现算：动作表里只存强度，同一招打在任意朝向的目标身上都能正确推开。
+FVector UHitReactionComponent::ResolveKnockbackDirection(const FMHDamageEvent& DamageEvent) const
+{
+	const ACharacter* Character = GetOwningCharacter();
+	if (!Character)
+	{
+		return FVector::ZeroVector;
+	}
+
+	// 主要路径：背离攻击者（从攻击者指向自己）的水平方向。
+	if (DamageEvent.Source)
+	{
+		const FVector AwayFromSource =
+			(Character->GetActorLocation() - DamageEvent.Source->GetActorLocation()).GetSafeNormal2D();
+		if (!AwayFromSource.IsNearlyZero())
+		{
+			return AwayFromSource;
+		}
+	}
+
+	// 没有来源或与来源重叠（环境伤害 / 自伤类效果）：背离命中点推开。
+	const FVector AwayFromHit =
+		(Character->GetActorLocation() - DamageEvent.HitLocation).GetSafeNormal2D();
+	if (!AwayFromHit.IsNearlyZero())
+	{
+		return AwayFromHit;
+	}
+
+	// 最后才用命中法线反向兜底，保证不会因为缺少位置信息而完全丢失击退。
+	return -DamageEvent.HitNormal.GetSafeNormal2D();
+}
+
 void UHitReactionComponent::ApplyLaunch(const FMHDamageEvent& DamageEvent, const FMHHitReactionDefinition* Definition)
 {
 	ACharacter* Character = GetOwningCharacter();
-	if (!Character || DamageEvent.LaunchImpulse.IsNearlyZero())
+	if (!Character || DamageEvent.LaunchStrength <= 0.f)
 	{
 		return;
 	}
 
+	FVector Direction = ResolveKnockbackDirection(DamageEvent);
+	if (Direction.IsNearlyZero())
+	{
+		return;
+	}
+	Direction.Z += 0.5f; 
 	const float LaunchScale = Definition ? FMath::Max(Definition->LaunchScale, 0.f) : 1.f;
-	Character->LaunchCharacter(DamageEvent.LaunchImpulse * LaunchScale, true, true);
+	// bZOverride = false：只覆盖水平速度，空中受击时保留原有下落速度，不会被“钉”在空中。
+	Character->LaunchCharacter(Direction * DamageEvent.LaunchStrength * LaunchScale, true, true);
 }
 
 void UHitReactionComponent::UpdateServerState(float DeltaTime)
@@ -448,7 +487,7 @@ UAnimInstance* UHitReactionComponent::GetOwningAnimInstance() const
 	return Character && Character->GetMesh() ? Character->GetMesh()->GetAnimInstance() : nullptr;
 }
 
-	// 客户端表现入口：Sequence 变化才算一次新的受击/结束，避免复制重发导致蒙太奇反复重播。
+// 客户端表现入口：Sequence 变化才算一次新的受击/结束，避免复制重发导致蒙太奇反复重播。
 void UHitReactionComponent::OnRep_ReactionState()
 {
 	const bool bNewReactionState = ReactionState.Sequence != AppliedReactionSequence;

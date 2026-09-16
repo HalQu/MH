@@ -12,6 +12,9 @@ public class MH : ModuleRules
 
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "UMG", "Slate", "SlateCore", "OnlineSubsystem", "OnlineSubsystemUtils"});
 
+        // 命中特效走 Niagara（SpawnSystemAtLocation），需要该模块。
+        PublicDependencyModuleNames.Add("Niagara");
+
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 
 		// Uncomment if you are using Slate UI

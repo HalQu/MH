@@ -9,7 +9,7 @@ class UAnimMontage;
 class UInputAction;
 class UWeaponDataAsset;
 class UCameraShakeBase;
-class UParticleSystem;
+class UNiagaraSystem;
 class USoundBase;
 
 UENUM(BlueprintType)
@@ -161,17 +161,47 @@ struct MH_API FMHHitReactionState
 	bool bSuperArmor = false;
 };
 
-/** 动作命中时由攻击者在本地生成的客户端表现配置。所有资源都可为空。 */
+/**
+ * 动作命中时在本地生成的客户端表现配置。它挂在 UWeaponDataAsset::Moves 的每个动作上，
+ * 由 UCombatFeedbackComponent 在收到服务器确认的命中事件后消费。所有资源都可以为空。
+ *
+ * 这里只放表现参数：任何一项都不参与伤害结算、命中判定或其它权威逻辑。
+ */
 USTRUCT(BlueprintType)
 struct MH_API FMHCombatHitFeedback
 {
 	GENERATED_BODY()
 
+	/** 命中特效（Niagara）。每台机器都在命中点本地生成一次，不参与复制。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback")
-	TSoftObjectPtr<UParticleSystem> ImpactParticle;
+	TSoftObjectPtr<UNiagaraSystem> ImpactEffect;
 
+	/** 命中特效缩放，用来区分轻击和重击的体量差。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback", meta = (ClampMin = "0.01"))
+	float ImpactEffectScale = 1.f;
+
+	/** 命中特效寿命（秒）。0 = 交给特效自身时长；循环特效会回退到组件上的兜底寿命。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback", meta = (ClampMin = "0.0"))
+	float ImpactEffectLifetime = 0.f;
+
+	/**
+	 * 命中音效候选列表。每台客户端各自随机抽一条播放，
+	 * 既避免所有客户端听到完全相同的采样，也让同一动作有音色变化。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback")
-	TSoftObjectPtr<USoundBase> ImpactSound;
+	TArray<TSoftObjectPtr<USoundBase>> ImpactSounds;
+
+	/** 命中音效音量倍率。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback", meta = (ClampMin = "0.0"))
+	float ImpactSoundVolume = 1.f;
+
+	/** 普通命中时的顿帧（卡肉）时长，0 表示不顿帧。只在攻击方本机的表现层生效。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback|HitStop", meta = (ClampMin = "0.0"))
+	float HitStopDuration = 0.06f;
+
+	/** 被无敌 / 霸体挡下时的顿帧时长。默认比普通命中短，填 0 表示挡住时不顿帧。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback|HitStop", meta = (ClampMin = "0.0"))
+	float BlockedHitStopDuration = 0.04f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Feedback")
 	TSubclassOf<UCameraShakeBase> CameraShakeClass;
@@ -534,8 +564,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Hit")
 	FName HitOriginSocketName = TEXT("weapon_r");
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Hit")
-	FVector LaunchImpulse = FVector::ZeroVector;
+	/** 击退强度（cm/s，0 = 不击退）。只存强度：方向由受击组件按命中来源实时计算。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Hit", meta = (ClampMin = "0.0"))
+	float LaunchStrength = 0.f;
 
 	/** 目标按该标识选择受击反应；未配置映射时仍执行硬直等逻辑。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|Hit")
@@ -578,8 +609,9 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage")
 	FVector HitNormal = FVector::ZeroVector;
 
-	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage")
-	FVector LaunchImpulse = FVector::ZeroVector;
+	/** 击退强度（cm/s）。只传递强度，方向由受击方在命中时自行推算。 */
+	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage", meta = (ClampMin = "0.0"))
+	float LaunchStrength = 0.f;
 
 	/** 服务器生成的稳定命中序号，用于客户端去重和调试追踪。 */
 	UPROPERTY(BlueprintReadWrite, Category = "Combat|Damage")

@@ -98,6 +98,9 @@ protected:
 	UAnimMontage* AttackMontage;
 private:
 	FVector2D InputVector;
+
+	/** 硬直或本机顿帧期间，移动与跳跃输入一律拒绝。 */
+	bool IsMovementInputBlocked() const;
 	void Move(const FInputActionValue& Value);
 	void StopMove();
 	void Look(const FInputActionValue& Value);
