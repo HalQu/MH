@@ -124,7 +124,47 @@ LobbyMap?listen?game=/Script/MH.MHGameMode_Lobby
 | `Client_OpenPersistentScreen` | Server -> Client | 在客户端打开对应的 UI |
 | `Client_ReturnToMainMenu` | Server -> Client | 房主离开时通知客户端回主菜单 |
 
-## 8. 自动闭环测试
+## 8. 编辑器内 PIE 测试
+
+### 主菜单单机检查
+
+1. 打开 `/Game/Levels/BeginMap`。
+2. 在 Play 下拉框中选择 `Play Standalone`，客户端数量设为 1。
+3. 点击 Play，应看到“狩猎行动”主菜单，并能点击“创建房间”。
+
+`BeginMap` 是空的菜单场景，没有可见地形、角色或相机画面。主菜单完全由 UMG 覆盖显示，因此 PIE 必须使用 `Play Standalone` 或 `Play As Listen Server`。如果使用 `Play As Client`，客户端在连接服务器成功并创建 PlayerController 前不会打开主菜单；没有服务器时该阶段会表现为黑屏或连接失败。
+
+项目本地设置应至少满足以下值：
+
+```ini
+PlayNetMode=PIE_Standalone
+RunUnderOneProcess=True
+PlayNumberOfClients=1
+```
+
+### 局域网联机检查
+
+PIE 可以改成 `Play As Listen Server` 和 2 个客户端，用于快速检查房间创建、搜索和加入。完整联机闭环仍优先使用下一节的两个独立 `-game` 进程，因为它更接近实际客户端/监听服务器结构，也能避免多个 PIE 窗口焦点和日志混在一个编辑器进程里。
+
+手工联机步骤：
+
+1. 第一个窗口创建房间，进入 Lobby。
+2. 第二个窗口刷新列表，选择同一个房间并加入。
+3. 所有玩家准备，房主点击开始狩猎。
+4. 狩猎结束后双方应看到相同结算，并自动回到 Lobby。
+5. 任何一方离开房间，双方应回到主菜单。
+
+出现黑屏时，先检查 `Saved/Logs/MH.log` 是否包含：
+
+```text
+[UIManager] Initialized
+LogNet: Welcomed by server (Game: /Script/MH.BeginGameMode)
+[UIManager] Opened persistent screen 'MainMenu'
+```
+
+如果第一行存在、第二行长时间没有出现，说明当前仍是客户端模式且在等待服务器；如果第二行已出现但没有第三行，才需要继续检查主菜单 Widget 的创建和布局。
+
+## 9. 自动闭环测试
 
 开发期可以用两个 `UnrealEditor -game` 进程验证完整流程。测试要求同一个项目构建，并且两个进程使用不同的日志文件。
 
@@ -172,7 +212,7 @@ RESULT=CLIENT_PASS
 
 自检使用单调墙钟计时，而不是直接依赖 Core Ticker 的 `DeltaTime`。无渲染或后台运行时 Ticker 的 delta 可能是零，如果用它判断 5 秒阶段条件，流程会被错误地无限延长。
 
-## 9. 当前边界
+## 10. 当前边界
 
 - 目前只实现 LAN/Null 子系统的房间发现和监听服务器联机。
 - 会话发现依赖局域网广播和 `CONNECT_STR`，尚未接入 Steam、EOS 等平台会话。
