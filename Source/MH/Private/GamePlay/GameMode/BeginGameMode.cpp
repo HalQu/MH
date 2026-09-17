@@ -6,6 +6,7 @@
 #include "UI/Core/BaseScreen.h"
 #include "UI/Core/UIScreenTypes.h"
 #include "UI/Core/UIManager.h"
+#include "UI/Screen/MainMenuScreen.h"
 
 namespace
 {
@@ -55,6 +56,7 @@ namespace
 ABeginGameMode::ABeginGameMode()
 {
     PlayerControllerClass = AMHPlayerController::StaticClass();
+    MainMenuScreenClass = UMHMainMenuScreen::StaticClass();
 }
 
 void ABeginGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -72,6 +74,9 @@ void ABeginGameMode::BeginPlay()
 {
     Super::BeginPlay();
 
+    // 旧蓝图仍指向空的 TScreen；主菜单闭环由原生可交互页面接管。
+    MainMenuScreenClass = UMHMainMenuScreen::StaticClass();
+
     for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
     {
         OpenMainMenuForPlayer(Iterator->Get(), MainMenuScreenClass);
@@ -81,6 +86,8 @@ void ABeginGameMode::BeginPlay()
 void ABeginGameMode::PostLogin(APlayerController* NewPlayer)
 {
     Super::PostLogin(NewPlayer);
+
+    MainMenuScreenClass = UMHMainMenuScreen::StaticClass();
 
     OpenMainMenuForPlayer(NewPlayer, MainMenuScreenClass);
 }

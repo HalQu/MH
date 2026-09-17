@@ -9,6 +9,12 @@
 #include "Kismet/GameplayStatics.h"
 #include "UI/Core/BaseScreen.h"
 #include "UI/Core/UIManager.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerState.h"
+#include "GamePlay/GameMode/MHGameMode_Hunting.h"
+#include "GamePlay/GameMode/MHGameMode_Lobby.h"
+#include "GamePlay/MHGameState_Hunting.h"
+#include "UI/Screen/HuntMenuScreen.h"
 
 AMHPlayerController::AMHPlayerController()
 {
@@ -33,6 +39,89 @@ void AMHPlayerController::Client_OpenPersistentScreen_Implementation(
 	OpenPersistentScreenLocal(ScreenID, ScreenClass, InputMode);
 }
 
+void AMHPlayerController::RequestLeaveToMainMenu()
+{
+	if (HasAuthority())
+	{
+		for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+		{
+			AMHPlayerController* OtherController = Cast<AMHPlayerController>(Iterator->Get());
+			if (OtherController && OtherController != this)
+			{
+				OtherController->Client_ReturnToMainMenu();
+			}
+		}
+	}
+
+	if (UMHGameInstance* GameInstance = GetGameInstance<UMHGameInstance>())
+	{
+		GameInstance->ReturnToMainMenu();
+	}
+}
+
+void AMHPlayerController::Client_ReturnToMainMenu_Implementation()
+{
+	if (UMHGameInstance* GameInstance = GetGameInstance<UMHGameInstance>())
+	{
+		GameInstance->ReturnToMainMenu();
+	}
+}
+
+void AMHPlayerController::Server_SetReady_Implementation(bool bNewReady)
+{
+	if (AMHGameMode_Lobby* LobbyMode = GetWorld()->GetAuthGameMode<AMHGameMode_Lobby>())
+	{
+		LobbyMode->SetPlayerReady(this, bNewReady);
+	}
+}
+
+void AMHPlayerController::Server_RequestStartHunt_Implementation()
+{
+	if (AMHGameMode_Lobby* LobbyMode = GetWorld()->GetAuthGameMode<AMHGameMode_Lobby>())
+{
+		LobbyMode->RequestStartHunt(this);
+	}
+}
+
+void AMHPlayerController::Server_RequestEndHunt_Implementation()
+{
+	if (AMHGameMode_Hunting* HuntingMode = GetWorld()->GetAuthGameMode<AMHGameMode_Hunting>())
+	{
+		HuntingMode->RequestEndHunt(this, NSLOCTEXT("MHFlow", "HostEndedHunt", "房主结束了狩猎"));
+	}
+}
+
+void AMHPlayerController::Server_RequestReturnToLobby_Implementation()
+{
+	if (AMHGameMode_Hunting* HuntingMode = GetWorld()->GetAuthGameMode<AMHGameMode_Hunting>())
+	{
+		HuntingMode->RequestEndHunt(this, NSLOCTEXT("MHFlow", "ReturningToLobby", "正在返回集会所"));
+	}
+}
+
+void AMHPlayerController::ToggleHuntMenu()
+{
+	if (!IsLocalController() || !GetWorld() || !GetWorld()->GetGameState<AMHGameState_Hunting>())
+	{
+		return;
+	}
+
+	UUIManager* UIManager = UUIManager::GetUIManager(this);
+	if (!UIManager)
+{
+		return;
+	}
+
+	if (UIManager->GetTopScreen(EUILayer::Overlay))
+{
+		UIManager->PopOverlay();
+}
+	else
+{
+		UIManager->PushOverlay(UMHHuntMenuScreen::StaticClass());
+}
+}
+
 void AMHPlayerController::BeginPlay()
 {
 	Super::BeginPlay();
@@ -49,5 +138,10 @@ void AMHPlayerController::BeginPlay()
 void AMHPlayerController::SetupInputComponent()
 {
 	Super::SetupInputComponent();
+
+	if (InputComponent)
+	{
+		InputComponent->BindAction(TEXT("PauseMenu"), IE_Pressed, this, &AMHPlayerController::ToggleHuntMenu);
+	}
 }
 

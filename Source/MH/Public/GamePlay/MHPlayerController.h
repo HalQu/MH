@@ -33,9 +33,31 @@ public:
 		TSubclassOf<UBaseScreen> ScreenClass,
 		EUIScreenInputMode InputMode);
 
+	/** 本机请求离开当前会话并回到主菜单。主机离开时会通知所有客户端一起返回。 */
+	UFUNCTION(BlueprintCallable, Category = "Flow")
+	void RequestLeaveToMainMenu();
+
+	UFUNCTION(Server, Reliable)
+	void Server_SetReady(bool bNewReady);
+
+	UFUNCTION(Server, Reliable)
+	void Server_RequestStartHunt();
+
+	UFUNCTION(Server, Reliable)
+	void Server_RequestEndHunt();
+
+	UFUNCTION(Server, Reliable)
+	void Server_RequestReturnToLobby();
+
+	UFUNCTION(Client, Reliable)
+	void Client_ReturnToMainMenu();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void SetupInputComponent() override;
+
+	/** 狩猎关卡中打开或关闭流程菜单。 */
+	void ToggleHuntMenu();
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputMappingContext> BaseContext;

@@ -8,6 +8,91 @@
 #include "Kismet/GameplayStatics.h"
 #include "GamePlay/MHPlayerController.h"
 #include "GamePlay/Character/MHCharacter.h"
+#if !UE_BUILD_SHIPPING
+#include "GamePlay/MHFlowAutoTest.h"
+#endif
+#include "Misc/CoreDelegates.h"
+#include "SocketSubsystem.h"
+#include "Interfaces/IPv4/IPv4Address.h"
+#include "Engine/NetDriver.h"
+
+namespace
+{
+	/** 是否为回环或无效地址。 */
+	bool IsUnusableHostAddress(const TSharedPtr<FInternetAddr>& Address)
+	{
+		if (!Address.IsValid() || !Address->IsValid())
+		{
+			return true;
+		}
+
+		uint32 Ip = 0;
+		Address->GetIp(Ip);
+		return (Ip & 0xff000000) == 0x7f000000;
+	}
+
+	/**
+	 * 取本机对外可用的局域网 IPv4，用于写入 CONNECT_STR。
+	 * 单机调试（只有回环地址）时退回 127.0.0.1，保证本机多开仍能联调。
+	 */
+	FString ResolveLANAddress()
+	{
+		ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+		if (!SocketSubsystem)
+		{
+			return TEXT("127.0.0.1");
+		}
+
+		bool bCanBindAll = false;
+		TSharedPtr<FInternetAddr> HostAddress = SocketSubsystem->GetLocalHostAddr(*GLog, bCanBindAll);
+		if (HostAddress.IsValid() && !IsUnusableHostAddress(HostAddress))
+		{
+			return HostAddress->ToString(false);
+		}
+
+		// 主机名解析到回环时，枚举网卡换一个非回环地址。
+		TArray<TSharedPtr<FInternetAddr>> LocalAddresses;
+		if (SocketSubsystem->GetLocalAdapterAddresses(LocalAddresses))
+		{
+			for (const TSharedPtr<FInternetAddr>& Address : LocalAddresses)
+			{
+				if (Address.IsValid() && !IsUnusableHostAddress(Address))
+				{
+					return Address->ToString(false);
+				}
+			}
+		}
+
+		return TEXT("127.0.0.1");
+	}
+
+	/** 实际监听端口；PIE 下引擎会给每个实例叠加 10000 的端口偏移。 */
+	int32 ResolveListenPort(const UWorld* World)
+	{
+		if (!World)
+		{
+			return 0;
+		}
+
+		int32 Port = World->URL.Port;
+#if WITH_EDITOR
+		if (Port > 0 && World->WorldType == EWorldType::PIE)
+		{
+			Port += 10000;
+		}
+#endif
+		return Port;
+	}
+}
+
+void UMHGameInstance::Init()
+{
+	Super::Init();
+
+#if !UE_BUILD_SHIPPING
+	FlowAutoTest = FMHFlowAutoTest::CreateIfRequested(*this);
+#endif
+}
 
 UMHGameInstance::UMHGameInstance()
 {
@@ -46,9 +131,9 @@ void UMHGameInstance::OnWorldChanged(UWorld* OldWorld, UWorld* NewWorld)
 				}
 
 				FOnlineSessionSettings SessionSettings;
-				SessionSettings.bIsLANMatch = true;
+				SessionSettings.bIsLANMatch = PendingIsLAN;
 				SessionSettings.bShouldAdvertise = true;
-				SessionSettings.bUsesPresence = true;
+				SessionSettings.bUsesPresence = PendingIsLAN;
 				SessionSettings.bUseLobbiesIfAvailable = false;
 				SessionSettings.NumPublicConnections = PendingMaxPlayers;
 				SessionSettings.bAllowJoinInProgress = true;
@@ -87,9 +172,12 @@ void UMHGameInstance::HostSession(const FString& ServerName, bool bIsLAN, int32 
 
 	// 保存待创建信息，ServerTravel 到 LobbyMap 后由 OnWorldChanged 创建会话（此时 NetDriver 已有端口）
 	PendingServerName = ServerName;
-	PendingMaxPlayers = MaxPlayers;
+	PendingIsLAN = bIsLAN;
+	PendingMaxPlayers = FMath::Clamp(MaxPlayers, 1, 16);
 
-	GetWorld()->ServerTravel("/Game/Levels/LobbyMap?listen");
+	const FString TravelURL = TEXT("/Game/Levels/LobbyMap?listen?game=/Script/MH.MHGameMode_Lobby");
+
+	GetWorld()->ServerTravel(TravelURL);
 }
 
 void UMHGameInstance::OnCreateSessionComplete(FName SessionName, bool bWasSuccessful)
@@ -101,19 +189,12 @@ void UMHGameInstance::OnCreateSessionComplete(FName SessionName, bool bWasSucces
 
 	if (bWasSuccessful)
 	{
-		int32 ListenPort = GetWorld() ? GetWorld()->URL.Port : 0;
-#if WITH_EDITOR
-		if (ListenPort > 0 && GetWorld() && GetWorld()->WorldType == EWorldType::PIE)
-		{
-			ListenPort += 10000;
-#if MH_DEBUG
-			UE_LOG(LogTemp, Log, TEXT("OnCreateSessionComplete: PIE adjusted port %d -> %d"), GetWorld()->URL.Port, ListenPort);
-#endif
-		}
-#endif
+		// 房主把本机可达地址写进会话设置：客户端优先用它，避免 LAN 广播地址
+		// 在单机多开或多网卡环境下被解析成回环地址、端口 0。
+		const int32 ListenPort = ResolveListenPort(GetWorld());
 		if (ListenPort > 0)
 		{
-			FString ConnectStr = FString::Printf(TEXT("127.0.0.1:%d"), ListenPort);
+			const FString ConnectStr = FString::Printf(TEXT("%s:%d"), *ResolveLANAddress(), ListenPort);
 #if MH_DEBUG
 			UE_LOG(LogTemp, Log, TEXT("OnCreateSessionComplete: Saving CONNECT_STR='%s'"), *ConnectStr);
 #endif
@@ -133,6 +214,7 @@ void UMHGameInstance::OnCreateSessionComplete(FName SessionName, bool bWasSucces
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("OnCreateSessionComplete: FAILED!"));
+		OnSessionOperationFailed.Broadcast(TEXT("创建房间失败，请返回主菜单后重试。"));
 	}
 
 }
@@ -151,6 +233,7 @@ void UMHGameInstance::FindSessions(bool bIsLAN)
 	if (!Subsystem)
 	{
 		UE_LOG(LogTemp, Error, TEXT("FindSessions: No OnlineSubsystem found!"));
+		OnSessionOperationFailed.Broadcast(TEXT("在线子系统不可用。"));
 		return;
 	}
 
@@ -162,6 +245,7 @@ void UMHGameInstance::FindSessions(bool bIsLAN)
 	if (!SessionInterface.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("FindSessions: No SessionInterface!"));
+		OnSessionOperationFailed.Broadcast(TEXT("会话接口不可用。"));
 		return;
 	}
 
@@ -191,6 +275,7 @@ void UMHGameInstance::FindSessions(bool bIsLAN)
 	if (!SessionInterface->FindSessions(0, SessionSearch.ToSharedRef()))
 	{
 		UE_LOG(LogTemp, Error, TEXT("FindSessions: FindSessions returned FALSE (immediate failure)!"));
+		OnSessionOperationFailed.Broadcast(TEXT("搜索房间失败。"));
 	}
 }
 
@@ -250,6 +335,10 @@ void UMHGameInstance::OnFindSessionsComplete(bool bWasSuccessful)
 	}
 
 	OnSessionsFound.Broadcast(SessionResults);
+	if (!bWasSuccessful)
+	{
+		OnSessionOperationFailed.Broadcast(TEXT("房间搜索未完成。"));
+	}
 }
 
 // ============================================================================
@@ -293,7 +382,9 @@ void UMHGameInstance::JoinSelectedSession(int32 SessionIndex)
 		FNamedOnlineSession* LocalSession = SessionInterface->GetNamedSession(NAME_GameSession);
 		if (LocalSession)
 		{
-			SessionInterface->DestroySession(NAME_GameSession);
+			PendingJoinSessionIndex = SessionIndex;
+			DestroySession();
+			return;
 		}
 
 		SessionInterface->OnJoinSessionCompleteDelegates.Remove(OnJoinSessionCompleteHandle);
@@ -309,40 +400,51 @@ void UMHGameInstance::JoinSelectedSession(int32 SessionIndex)
 	UE_LOG(LogTemp, Error, TEXT("JoinSession: Session index %d not found in SearchResults (have %d results)!"), SessionIndex, SessionSearch.IsValid() ? SessionSearch->SearchResults.Num() : 0);
 }
 
+void UMHGameInstance::ContinueJoinSelectedSession(int32 SessionIndex)
+{
+	JoinSelectedSession(SessionIndex);
+}
+
 void UMHGameInstance::OnJoinSessionComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result)
 {
 	UE_LOG(LogTemp, Log, TEXT("OnJoinSessionComplete: Session=%s, Result=%d"), *SessionName.ToString(), (int32)Result);
 
 	if (Result == EOnJoinSessionCompleteResult::Success)
 	{
-		FString TravelURL;
-		if (SessionInterface->GetResolvedConnectString(SessionName, TravelURL))
-		{
-			// NULL 子系统端口解析可能失败（返回 :0），改用自定义连接串
-			if (TravelURL.EndsWith(":0") || TravelURL.EndsWith(":") || TravelURL.IsEmpty())
-			{
-				if (!PendingConnectString.IsEmpty())
-				{
-#if MH_DEBUG
-					UE_LOG(LogTemp, Log, TEXT("OnJoinSessionComplete: GetResolvedConnectString returned '%s' — using CONNECT_STR='%s'"),
-						*TravelURL, *PendingConnectString);
-#endif
-					TravelURL = PendingConnectString;
-				}
-			}
+		FString ResolvedURL;
+		const bool bResolved = SessionInterface->GetResolvedConnectString(SessionName, ResolvedURL);
 
-			APlayerController* PC = GetFirstLocalPlayerController();
-			if (PC)
-			{
-				PC->ClientTravel(TravelURL, TRAVEL_Absolute);
-				OnSessionJoined.Broadcast();
-			}
+		// 房主写入的 CONNECT_STR 最可靠：LAN 广播解析出的地址在单机多开、多网卡
+		// 或 PIE 端口偏移场景下可能是回环地址或端口 0。
+		FString TravelURL = !PendingConnectString.IsEmpty() ? PendingConnectString : ResolvedURL;
+
+		if (TravelURL.IsEmpty() || TravelURL.EndsWith(TEXT(":0")) || TravelURL.EndsWith(TEXT(":")))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("OnJoinSessionComplete: 无可用的连接地址 (Resolved='%s' bResolved=%d, CONNECT_STR='%s')"),
+				*ResolvedURL, bResolved ? 1 : 0, *PendingConnectString);
+			PendingConnectString.Empty();
+			OnSessionOperationFailed.Broadcast(TEXT("无法解析房间地址，请重新搜索后再试。"));
+			return;
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("OnJoinSessionComplete: ClientTravel -> %s"), *TravelURL);
+
+		if (APlayerController* PC = GetFirstLocalPlayerController())
+		{
+			PC->ClientTravel(TravelURL, TRAVEL_Absolute);
+			OnSessionJoined.Broadcast();
+		}
+		else
+		{
+			OnSessionOperationFailed.Broadcast(TEXT("本机没有可用的玩家控制器，无法加入房间。"));
 		}
 		PendingConnectString.Empty();
 	}
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("OnJoinSessionComplete: Failed with result %d"), (int32)Result);
+		OnSessionOperationFailed.Broadcast(TEXT("加入房间失败，房间可能已经关闭。"));
 	}
 }
 
@@ -366,6 +468,50 @@ void UMHGameInstance::OnDestroySessionComplete(FName SessionName, bool bWasSucce
 {
 	UE_LOG(LogTemp, Log, TEXT("OnDestroySessionComplete: Session=%s, Success=%d"), *SessionName.ToString(), bWasSuccessful);
 	OnSessionDestroyed.Broadcast(bWasSuccessful);
+
+	if (PendingJoinSessionIndex != INDEX_NONE)
+	{
+		const int32 JoinIndex = PendingJoinSessionIndex;
+		PendingJoinSessionIndex = INDEX_NONE;
+		ContinueJoinSelectedSession(JoinIndex);
+		return;
+	}
+
+	if (bReturnToMainMenuAfterDestroy)
+	{
+		bReturnToMainMenuAfterDestroy = false;
+		TravelToMainMenu();
+	}
+}
+
+void UMHGameInstance::ReturnToMainMenu()
+{
+	bReturnToMainMenuAfterDestroy = true;
+	PendingJoinSessionIndex = INDEX_NONE;
+
+	if (HasActiveSession())
+	{
+		DestroySession();
+		return;
+	}
+
+	bReturnToMainMenuAfterDestroy = false;
+	TravelToMainMenu();
+}
+
+bool UMHGameInstance::HasActiveSession() const
+{
+	return SessionInterface.IsValid() && SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
+}
+
+void UMHGameInstance::TravelToMainMenu()
+{
+	if (APlayerController* PlayerController = GetFirstLocalPlayerController())
+{
+		const FString TravelURL = TEXT("/Game/Levels/BeginMap?game=/Script/MH.BeginGameMode");
+
+		PlayerController->ClientTravel(TravelURL, TRAVEL_Absolute);
+}
 }
 
 

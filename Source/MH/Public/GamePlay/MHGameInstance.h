@@ -28,7 +28,7 @@ struct FSessionData
 	UPROPERTY(BlueprintReadOnly, Category = "Session")
 	int32 Ping = 0;
 
-	// 内部索引，供 JoinSession 使用
+	UPROPERTY(BlueprintReadOnly, Category = "Session")
 	int32 SessionIndex = -1;
 };
 
@@ -36,6 +36,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnHostSessionComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSessionsFound, const TArray<FSessionData>&, SessionResults);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSessionJoined);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSessionDestroyed, bool, bWasSuccessful);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSessionOperationFailed, const FString&, ErrorMessage);
 
 /**
  * 游戏实例：管理网络会话（基于 LAN / OnlineSubsystemNull）
@@ -47,6 +48,8 @@ class MH_API UMHGameInstance : public UGameInstance
 
 public:
 	UMHGameInstance();
+
+	virtual void Init() override;
 
 	// ===== 会话操作 =====
 
@@ -66,6 +69,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Session")
 	void DestroySession();
 
+	/** 销毁当前集会并返回主菜单；主机调用时需先通知客户端。 */
+	UFUNCTION(BlueprintCallable, Category = "Session")
+	void ReturnToMainMenu();
+
+	UFUNCTION(BlueprintPure, Category = "Session")
+	bool HasActiveSession() const;
+
 	/** 获取当前查找结果中的集会数量 */
 	UFUNCTION(BlueprintCallable, Category = "Session")
 	int32 GetSessionResultCount() const;
@@ -84,6 +94,8 @@ public:
 	FOnSessionJoined OnSessionJoined;
 	UPROPERTY(BlueprintAssignable, Category = "Session")
 	FOnSessionDestroyed OnSessionDestroyed;
+	UPROPERTY(BlueprintAssignable, Category = "Session")
+	FOnSessionOperationFailed OnSessionOperationFailed;
 
 private:
 
@@ -126,6 +138,18 @@ protected:
 
 	/** 客户端加入时从搜索结果中提取的连接地址（后备 GetResolvedConnectString） */
 	FString PendingConnectString;
+
+	bool PendingIsLAN = true;
+	int32 PendingJoinSessionIndex = INDEX_NONE;
+	bool bReturnToMainMenuAfterDestroy = false;
+
+#if !UE_BUILD_SHIPPING
+	/** 完整流程自检（仅 -MHAutoTest=Host|Client 时创建，Shipping 构建中永远为空）。 */
+	TSharedPtr<class FMHFlowAutoTest> FlowAutoTest;
+#endif
+
+	void ContinueJoinSelectedSession(int32 SessionIndex);
+	void TravelToMainMenu();
 
 	/** 关卡加载完成后回调：用于到达 LobbyMap 后正式创建会话 */
 	virtual void OnWorldChanged(UWorld* OldWorld, UWorld* NewWorld) override;

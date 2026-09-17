@@ -12,6 +12,9 @@ public class MH : ModuleRules
 
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "UMG", "Slate", "SlateCore", "OnlineSubsystem", "OnlineSubsystemUtils"});
 
+        // 局域网房间广播需要解析本机网卡地址。
+        PublicDependencyModuleNames.Add("Sockets");
+
         // 命中特效走 Niagara（SpawnSystemAtLocation），需要该模块。
         PublicDependencyModuleNames.Add("Niagara");
 
