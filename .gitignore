@@ -1,5 +1,8 @@
 # 只跟踪 Source 目录下的代码，其余（Binaries/Content/Intermediate/Saved/Config 等）一律不入库
 /*
+!/README.md
 !.gitignore
+!/Docs/
+!/Docs/**
 !/Source/
 !/Source/**
