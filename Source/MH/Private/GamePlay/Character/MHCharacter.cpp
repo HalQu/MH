@@ -5,26 +5,15 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GamePlay/Combat/UCombatComponent.h"
 #include "GamePlay/Combat/UCombatFeedbackComponent.h"
 #include "GamePlay/Combat/UHitReactionComponent.h"
-#include "GamePlay/Combat/UHealthComponent.h"
 // Sets default values
 AMHCharacter::AMHCharacter()
 {
- 	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
-	PrimaryActorTick.bCanEverTick = true;
-
-	bReplicates = true;
-
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-	GetCapsuleComponent()->SetGenerateOverlapEvents(false);
-
-	GetMesh()->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-	GetMesh()->SetGenerateOverlapEvents(true);
-
+	// 组件装配、复制开关与碰撞响应都由 AMHCombatCharacterBase 统一处理。
+	// 这里只负责玩家专属的相机。
 	SpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("Spring Arm"));
 	SpringArm->SetupAttachment(GetRootComponent());
 	SpringArm->TargetArmLength = 600.f;
@@ -35,71 +24,12 @@ AMHCharacter::AMHCharacter()
 	Camera->SetupAttachment(SpringArm);
 	Camera->bUsePawnControlRotation = false; // prevents camera from moving independently
 
-	CombatComponent = CreateDefaultSubobject<UCombatComponent>(TEXT("CombatComponent"));
-	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
-	HitReactionComponent = CreateDefaultSubobject<UHitReactionComponent>(TEXT("HitReactionComponent"));
-	CombatFeedbackComponent = CreateDefaultSubobject<UCombatFeedbackComponent>(TEXT("CombatFeedbackComponent"));
-
 	bUseControllerRotationYaw = false;
 	GetCharacterMovement()->bOrientRotationToMovement = true;
 	GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f);
 
 }
 
-
-void AMHCharacter::BeginPlay()
-{
-	Super::BeginPlay();
-	if (HealthComponent)
-	{
-		HealthComponent->OnDeath.AddDynamic(this, &AMHCharacter::HandleDeath);
-	}
-}
-
-FMHDamageResult AMHCharacter::ReceiveDamage_Implementation(const FMHDamageEvent& DamageEvent)
-{
-	FMHDamageResult Result;
-	if (!HealthComponent)
-	{
-		return Result;
-	}
-
-	Result.bHit = true;
-	Result.HitReactionId = DamageEvent.HitReactionId;
-
-	// Invulnerability is checked before health so an invulnerable target never loses HP.
-	if (HitReactionComponent && !HitReactionComponent->CanReceiveHit())
-	{
-		Result.bInvulnerable = true;
-		Result.RemainingHealth = HealthComponent->GetHealth();
-		return Result;
-	}
-
-	Result.AppliedDamage = HealthComponent->ApplyDamage(DamageEvent);
-	Result.RemainingHealth = HealthComponent->GetHealth();
-	Result.bKilled = HealthComponent->IsDead();
-
-	if (HitReactionComponent)
-	{
-		HitReactionComponent->HandleConfirmedHit(DamageEvent, Result);
-	}
-
-	if (Result.bInterruptedTarget && CombatComponent)
-	{
-		CombatComponent->CancelCurrentAttack();
-	}
-
-	return Result;
-}
-
-void AMHCharacter::HandleDeath()
-{
-	// 死亡后不再接受输入、也不再开新动作；进行中的动作由组件自己收尾。
-	if (CombatComponent)
-	{
-		CombatComponent->SetCombatEnabled(false);
-	}
-}
 
 void AMHCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
@@ -143,7 +73,7 @@ void AMHCharacter::Tick(float DeltaTime)
 
 void AMHCharacter::Move(const FInputActionValue& Value)
 {
-	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	if (IsMovementInputBlocked())
 	{
 		return;
 	}
@@ -179,7 +109,7 @@ void AMHCharacter::StopMove()
 
 void AMHCharacter::HandleJumpPressed()
 {
-	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	if (IsMovementInputBlocked())
 	{
 		return;
 	}
@@ -203,6 +133,17 @@ void AMHCharacter::Look(const FInputActionValue& Value)
 	AddControllerYawInput(LookVector.X);
 	AddControllerPitchInput(LookVector.Y);
 
+}
+
+// 硬直来自权威受击状态；受击期间不接受移动输入。
+bool AMHCharacter::IsMovementInputBlocked() const
+{
+	if (HitReactionComponent && HitReactionComponent->IsMovementLocked())
+	{
+		return true;
+	}
+
+	return false;
 }
 
 

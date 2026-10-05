@@ -15,6 +15,10 @@ public class MH : ModuleRules
         // 局域网房间广播需要解析本机网卡地址。
         PublicDependencyModuleNames.Add("Sockets");
 
+        // 怪物 AI：AIController / 行为树依赖 AIModule，导航依赖 NavigationSystem，
+        // AI 相关的异步任务（如 MoveTo）依赖 GameplayTasks。
+        PublicDependencyModuleNames.AddRange(new string[] { "AIModule", "NavigationSystem", "GameplayTasks" });
+
         // 命中特效走 Niagara（SpawnSystemAtLocation），需要该模块。
         PublicDependencyModuleNames.Add("Niagara");
 
