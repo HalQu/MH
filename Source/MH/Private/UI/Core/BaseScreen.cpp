@@ -134,6 +134,11 @@ void UBaseScreen::SetInputModePolicy(EUIScreenInputMode NewInputMode)
     InputModePolicy = NewInputMode;
 }
 
+UWidget* UBaseScreen::GetDesiredFocusWidget()
+{
+    return this;
+}
+
 UUIManager* UBaseScreen::GetUIManager() const
 {
     if (ULocalPlayer* LocalPlayer = GetOwningLocalPlayer())

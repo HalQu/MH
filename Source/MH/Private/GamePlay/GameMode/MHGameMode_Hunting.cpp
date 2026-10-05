@@ -25,18 +25,16 @@ AMHGameMode_Hunting::AMHGameMode_Hunting()
 	PlayerControllerClass = AMHPlayerController::StaticClass();
 	PlayerStateClass = AMHPlayerState::StaticClass();
 	GameStateClass = AMHGameState_Hunting::StaticClass();
-	HuntingHUDClass = UMHHuntingStatusHUD::StaticClass();
+	
 	bUseSeamlessTravel = true;
 }
 
 void AMHGameMode_Hunting::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	// GameState/Controller 必须在 InitGame 前确定，避免地图或蓝图 CDO 覆盖流程配置。
-	DefaultPawnClass = AMHCharacter::StaticClass();
-	PlayerControllerClass = AMHPlayerController::StaticClass();
 	PlayerStateClass = AMHPlayerState::StaticClass();
 	GameStateClass = AMHGameState_Hunting::StaticClass();
-	HuntingHUDClass = UMHHuntingStatusHUD::StaticClass();
+	
 	bUseSeamlessTravel = true;
 
 	Super::InitGame(MapName, Options, ErrorMessage);
@@ -156,7 +154,7 @@ void AMHGameMode_Hunting::Tick(float DeltaSeconds)
         {
             TimeUntilLobbyTravel = -1.f;
 			UE_LOG(LogTemp, Log, TEXT("Hunting: returning to lobby"));
-			GetWorld()->ServerTravel(TEXT("/Game/Levels/LobbyMap?listen?game=/Script/MH.MHGameMode_Lobby"));
+			GetWorld()->ServerTravel(TEXT("/Game/Levels/LobbyMap?listen?"));
         }
         return;
     }

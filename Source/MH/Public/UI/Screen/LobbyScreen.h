@@ -21,9 +21,12 @@ class MH_API ULobbyScreen : public UBaseScreen
 public:
 	ULobbyScreen();
 
-	virtual void NativeConstruct() override;
-	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
-	virtual void OnOpen(UObject* Param) override;
+    virtual void NativeConstruct() override;
+    virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+    virtual void OnOpen(UObject* Param) override;
+
+    /** 键盘输入优先落在当前最合适的操作按钮上。 */
+    virtual UWidget* GetDesiredFocusWidget() override;
 
 private:
 	void BuildLayout();

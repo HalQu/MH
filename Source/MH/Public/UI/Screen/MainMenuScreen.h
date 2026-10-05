@@ -46,6 +46,7 @@ private:
 	friend class UMHSessionButtonProxy;
 
 	void BuildLayout();
+	void BindWidgetEvents();
 	void RefreshSessionList(const TArray<FSessionData>& SessionResults);
 	void SetStatus(const FString& Text);
 	void SetBusy(bool bNewBusy);
@@ -75,22 +76,22 @@ private:
 	void BindSessionDelegates();
 	void UnbindSessionDelegates();
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UEditableTextBox> ServerNameInput;
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UVerticalBox> SessionList;
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UTextBlock> StatusText;
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UButton> HostButton;
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UButton> RefreshButton;
 
-	UPROPERTY()
+	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UButton> QuitButton;
 
 	UPROPERTY()

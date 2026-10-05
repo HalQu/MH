@@ -7,6 +7,7 @@
 
 class UBaseViewModel;
 class UUIManager;
+class UWidget;
 
 /**
  * BaseScreen - 所有 UI 页面的基类
@@ -48,6 +49,9 @@ public:
     /** 当前页面声明的输入模式策略。 */
     UFUNCTION(BlueprintPure, Category = "Screen")
     EUIScreenInputMode GetInputModePolicy() const { return InputModePolicy; }
+
+    /** 页面占用键盘焦点时应聚焦的控件；默认是页面根控件。 */
+    virtual UWidget* GetDesiredFocusWidget();
 
     /** 关闭动画时长，作为 UIManager 延迟移除页面的依据。 */
     UFUNCTION(BlueprintPure, Category = "Screen")

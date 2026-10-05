@@ -33,6 +33,7 @@ void UMHMainMenuScreen::NativeConstruct()
 {
 	Super::NativeConstruct();
 	BuildLayout();
+	BindWidgetEvents();
 }
 
 void UMHMainMenuScreen::BuildLayout()
@@ -136,11 +137,31 @@ void UMHMainMenuScreen::BuildLayout()
 	RefreshSessionList(TArray<FSessionData>());
 }
 
+void UMHMainMenuScreen::BindWidgetEvents()
+{
+	if (!ServerNameInput || !SessionList || !StatusText || !HostButton || !RefreshButton || !QuitButton)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[UMHMainMenuScreen] WBP_MainMenu is missing one or more required BindWidget controls."));
+		return;
+	}
+
+	HostButton->OnClicked.RemoveDynamic(this, &UMHMainMenuScreen::HandleHostClicked);
+	HostButton->OnClicked.AddDynamic(this, &UMHMainMenuScreen::HandleHostClicked);
+
+	RefreshButton->OnClicked.RemoveDynamic(this, &UMHMainMenuScreen::HandleRefreshClicked);
+	RefreshButton->OnClicked.AddDynamic(this, &UMHMainMenuScreen::HandleRefreshClicked);
+
+	QuitButton->OnClicked.RemoveDynamic(this, &UMHMainMenuScreen::HandleQuitClicked);
+	QuitButton->OnClicked.AddDynamic(this, &UMHMainMenuScreen::HandleQuitClicked);
+}
+
 void UMHMainMenuScreen::OnOpen(UObject* Param)
 {
 	Super::OnOpen(Param);
 	BuildLayout();
 	BindSessionDelegates();
+	RefreshSessionList(TArray<FSessionData>());
 
 	if (ServerNameInput && ServerNameInput->GetText().IsEmpty())
 	{
@@ -211,7 +232,7 @@ void UMHMainMenuScreen::SetStatus(const FString& Text)
 	if (StatusText)
 	{
 		StatusText->SetText(FText::FromString(Text));
-		StatusText->SetVisibility(Text.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+		StatusText->SetVisibility(Text.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
 	}
 }
 
@@ -234,6 +255,7 @@ void UMHMainMenuScreen::SetBusy(bool bNewBusy)
 
 void UMHMainMenuScreen::HandleHostClicked()
 {
+	SetStatus(TEXT("你正在创建房间..."));
 	if (bBusy)
 	{
 		return;
