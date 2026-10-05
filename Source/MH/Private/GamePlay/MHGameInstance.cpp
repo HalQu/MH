@@ -175,7 +175,7 @@ void UMHGameInstance::HostSession(const FString& ServerName, bool bIsLAN, int32 
 	PendingIsLAN = bIsLAN;
 	PendingMaxPlayers = FMath::Clamp(MaxPlayers, 1, 16);
 
-	const FString TravelURL = TEXT("/Game/Levels/LobbyMap?listen?game=/Script/MH.MHGameMode_Lobby");
+	const FString TravelURL = TEXT("/Game/Levels/LobbyMap?listen");
 
 	GetWorld()->ServerTravel(TravelURL);
 }
@@ -508,7 +508,7 @@ void UMHGameInstance::TravelToMainMenu()
 {
 	if (APlayerController* PlayerController = GetFirstLocalPlayerController())
 {
-		const FString TravelURL = TEXT("/Game/Levels/BeginMap?game=/Script/MH.BeginGameMode");
+		const FString TravelURL = TEXT("/Game/Levels/BeginMap?");
 
 		PlayerController->ClientTravel(TravelURL, TRAVEL_Absolute);
 }

@@ -1,6 +1,7 @@
 #include "UI/Core/UIManager.h"
 
 #include "Blueprint/UserWidget.h"
+#include "Components/Widget.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -553,7 +554,8 @@ void UUIManager::SetInputMode(EUIScreenInputMode InputMode, UBaseScreen* FocusSc
     if (InputMode == EUIScreenInputMode::UIOnly)
     {
         FInputModeUIOnly Mode;
-        const TSharedPtr<SWidget> FocusWidget = FocusScreen ? FocusScreen->GetCachedWidget() : nullptr;
+        UWidget* FocusTarget = FocusScreen ? FocusScreen->GetDesiredFocusWidget() : nullptr;
+        const TSharedPtr<SWidget> FocusWidget = FocusTarget ? FocusTarget->GetCachedWidget() : nullptr;
         if (FocusWidget.IsValid() && FocusWidget->SupportsKeyboardFocus())
         {
             Mode.SetWidgetToFocus(FocusWidget);
@@ -567,7 +569,8 @@ void UUIManager::SetInputMode(EUIScreenInputMode InputMode, UBaseScreen* FocusSc
     if (InputMode == EUIScreenInputMode::GameAndUI)
     {
         FInputModeGameAndUI Mode;
-        const TSharedPtr<SWidget> FocusWidget = FocusScreen ? FocusScreen->GetCachedWidget() : nullptr;
+        UWidget* FocusTarget = FocusScreen ? FocusScreen->GetDesiredFocusWidget() : nullptr;
+        const TSharedPtr<SWidget> FocusWidget = FocusTarget ? FocusTarget->GetCachedWidget() : nullptr;
         if (FocusWidget.IsValid() && FocusWidget->SupportsKeyboardFocus())
         {
             Mode.SetWidgetToFocus(FocusWidget);

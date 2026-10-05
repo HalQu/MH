@@ -17,8 +17,25 @@
 
 ULobbyScreen::ULobbyScreen()
 {
-	InputModePolicy = EUIScreenInputMode::UIOnly;
+	InputModePolicy = EUIScreenInputMode::GameAndUI;
 	CloseAnimDuration = 0.f;
+}
+
+UWidget* ULobbyScreen::GetDesiredFocusWidget()
+{
+	if (StartButton
+		&& StartButton->GetVisibility() == ESlateVisibility::Visible
+		&& StartButton->GetIsEnabled())
+	{
+		return StartButton;
+	}
+
+	if (ReadyButton && ReadyButton->GetIsEnabled())
+	{
+		return ReadyButton;
+	}
+
+	return LeaveButton ? static_cast<UWidget*>(LeaveButton) : Super::GetDesiredFocusWidget();
 }
 
 void ULobbyScreen::NativeConstruct()

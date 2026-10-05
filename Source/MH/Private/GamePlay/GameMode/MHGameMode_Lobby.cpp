@@ -37,7 +37,7 @@ namespace
 				PlayerController,
 				FName(TEXT("Lobby")),
 				ScreenClass,
-				EUIScreenInputMode::UIOnly);
+				EUIScreenInputMode::GameOnly);
 			return;
 		}
 
@@ -46,15 +46,13 @@ namespace
 			MHController->Client_OpenPersistentScreen(
 				FName(TEXT("Lobby")),
 				ScreenClass,
-				EUIScreenInputMode::UIOnly);
+				EUIScreenInputMode::GameOnly);
 		}
 	}
 }
 AMHGameMode_Lobby::AMHGameMode_Lobby()
 {
 	bUseSeamlessTravel = true;
-	DefaultPawnClass = AMHCharacter::StaticClass();
-	PlayerControllerClass = AMHPlayerController::StaticClass();
 	PlayerStateClass = AMHPlayerState::StaticClass();
 	LobbyScreenClass = ULobbyScreen::StaticClass();
 }
@@ -66,7 +64,6 @@ void AMHGameMode_Lobby::InitGame(const FString& MapName, const FString& Options,
 	// 自动测试不依赖角色表现，避开首次运行时的巨型骨骼网格派生数据构建。
 	if (IsFlowAutoTestEnabled())
 	{
-		DefaultPawnClass = ADefaultPawn::StaticClass();
 	}
 }
 
@@ -193,7 +190,7 @@ void AMHGameMode_Lobby::RequestStartHunt(APlayerController* RequestingController
 }
 
 	UE_LOG(LogTemp, Log, TEXT("Lobby: host started hunt with %d player(s)."), GetPlayerCount());
-	const FString TravelURL = TEXT("/Game/Levels/HuntingMap?listen?game=/Script/MH.MHGameMode_Hunting");
+	const FString TravelURL = TEXT("/Game/Levels/HuntingMap?listen?");
 
 	GetWorld()->ServerTravel(TravelURL);
 }
